@@ -1,0 +1,36 @@
+﻿# Python virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+secrets/
+keys/
+*.pem
+*.key
+
+# Database and backups
+*.db
+*.sqlite3
+backups/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs and reports
+*.log
+.coverage
+htmlcov/
+
+# OS files
+.DS_Store
+Thumbs.db
