@@ -67,7 +67,7 @@ snapshots and published results.
 - BR-05: Voting must not receive voter identity or RA sessions.
 - BR-06: Voting must verify a valid blind signature
   bound to the election and encrypted envelope.
-- BR-07: Ballots can only be submitted during OPEN.
+- BR-07: Ballots can only be accepted during OPEN and within the server-enforced election time window.
 - BR-08: A serial can be accepted only once per election.
 - BR-09: Tally cannot run before CLOSED.
 - BR-10: Only valid accepted ballots are counted.

@@ -40,6 +40,8 @@ Notes:
 
 ## 2. Design Review Findings
 
+The DR-01 to DR-05 entries below record the ORIGINAL requirements-stage findings. Their historical `OPEN` status is not the current workflow review status. See Document 11 (Decision Register) for the authoritative current design status, limitations and implementation dependencies.
+
 ### DR-01 - Credential Issuance Recovery
 
 Priority: HIGH
@@ -178,7 +180,10 @@ API separation and privacy logging rules.
 
 ## 4. Review Status
 
-Overall: PENDING REVIEW
+Overall: REQUIREMENTS BASELINE REVIEWED; WORKFLOW DECISIONS SPECIFIED WITH LIMITATIONS
+
+Current reference:
+Document 11 - Decision Register (P01.2); implementation and security tests remain pending.
 
 Next Phase:
-P01.2 - Workflow and Sequence Design
+P01.3 - Database Design

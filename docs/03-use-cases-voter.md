@@ -74,7 +74,8 @@ Select a candidate and encrypt the vote locally.
 ### Pre-conditions
 - Voter is authenticated with RA.
 - Election is OPEN.
-- Election public keys are available.
+- The signed frozen election configuration is verified against an independently trusted evidence key before candidate display or encryption.
+- The RA and Tally public-key fingerprints match the verified frozen configuration.
 - Client supports the required crypto algorithms.
 
 ### Input Data
@@ -84,7 +85,7 @@ Select a candidate and encrypt the vote locally.
 - RA Public Key
 
 ### Main Flow
-1. Client displays the election candidates.
+1. Client displays candidates only from the verified signed frozen election configuration.
 2. Voter selects exactly one candidate.
 3. Client displays the selected candidate.
 4. Voter confirms the final choice.
@@ -107,7 +108,8 @@ Select a candidate and encrypt the vote locally.
 ### Exception Flow
 - No candidate selected: validation error.
 - Invalid candidate ID: selection rejected.
-- Missing public key: operation denied.
+- Missing, untrusted or substituted public key: operation denied.
+- Invalid configuration signature or mismatched fingerprint: abort before ballot encryption.
 - Unsupported algorithm: operation denied.
 - Encryption failure: abort without issuance.
 
@@ -127,6 +129,7 @@ Select a candidate and encrypt the vote locally.
 - Tally private key must never be sent to Client.
 - No change to the signed ballot is allowed
   after credential issuance.
+- Before encrypting, Client MUST verify the frozen-configuration signature and independently trusted evidence key, then match RA/Tally key fingerprints. A key ID alone is insufficient.
 
 ---
 
@@ -142,7 +145,7 @@ Issue a single blind signature for an eligible voter.
 - Voter has a valid RA session.
 - Voter is eligible for the election.
 - Election is OPEN.
-- No credential has already been issued.
+- For first issuance, no credential has been issued; an exact retry may retrieve the original committed issuance.
 - Client has prepared a blinded message.
 
 ### Input Data
@@ -173,7 +176,7 @@ Issue a single blind signature for an eligible voter.
 ### Exception Flow
 - Invalid RA session: HTTP 401.
 - Ineligible voter: HTTP 403.
-- Credential already issued: HTTP 409.
+- Different second credential request: HTTP 409. Exact retry returns the original stored response.
 - Invalid blinded message: HTTP 422.
 - Signing failure: no successful issuance.
 - Concurrent issuance: only one succeeds.
@@ -339,7 +342,7 @@ on the Public Bulletin Board.
 | VOT-03 | Ineligible voter requests credential | Rejected |
 | VOT-04 | Encrypt a valid ballot | Encrypted envelope created |
 | VOT-05 | Request first credential | Success |
-| VOT-06 | Request credential twice | Second rejected |
+| VOT-06 | Request a different second credential | HTTP 409; no second issuance |
 | VOT-07 | Verify finalized blind signature | Valid |
 | VOT-08 | Submit valid encrypted ballot | Accepted |
 | VOT-09 | Submit forged signature | Rejected |
@@ -351,7 +354,7 @@ on the Public Bulletin Board.
 | VOT-15 | Verify unknown receipt | Not found |
 | VOT-16 | Modify signed board snapshot | Verification failed |
 | VOT-17 | Submit 20 concurrent duplicate requests | Exactly 1 accepted |
-| VOT-18 | RA response lost after issuance | No automatic reissue |
+| VOT-18 | RA response lost after issuance | Exact retry returns original blind_sig; no new issuance |
 
 ---
 

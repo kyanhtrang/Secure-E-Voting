@@ -192,6 +192,7 @@ Activate a prepared election for voting.
 - RA public key is available.
 - Tally public key is available.
 - Required election configuration is valid.
+- Signed frozen configuration and independent trust evidence can be prepared and verified before OPEN.
 
 ### Main Flow
 1. Admin opens Election Management.
@@ -200,8 +201,8 @@ Activate a prepared election for voting.
 4. System checks Admin permission.
 5. System validates election readiness.
 6. System confirms the public-key metadata.
-7. System verifies RA readiness.
-8. System changes election status to OPEN.
+7. System verifies RA readiness and independently trusted frozen-configuration evidence (Document 06).
+8. System stores the immutable configuration reference and transitions atomically to OPEN.
 9. System records an audit event.
 10. System displays the OPEN status.
 
