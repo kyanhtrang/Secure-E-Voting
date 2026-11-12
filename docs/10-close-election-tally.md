@@ -1075,7 +1075,7 @@ accepted_total = valid_total + invalid_total
 
 counted_total = valid_total
 
-SUM(candidate_vote_count) = counted_total
+SUM(candidate_counts[*].vote_count) = counted_total
 
 The report_digest field is NOT included
 in the data being hashed.
