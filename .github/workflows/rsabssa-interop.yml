@@ -4,6 +4,7 @@ name: RSABSSA interoperability
   push:
     branches:
       - feat/blind-credential-anonymous-voting
+      - feat/ra-credential-issuance-recovery
 
 permissions:
   contents: read
@@ -75,9 +76,14 @@ jobs:
           export EVOTE_TEST_NODE="$(command -v node)"
           "$RUNNER_TEMP/rsabssa-python/bin/python" -m pytest crypto_interop/ -q
 
-      - name: Run native Go signer tests without test-result caching
+      - name: Run native Go test and runtime signer tests without test-result caching
         working-directory: crypto_interop/signer
+        # ./... includes cmd/ra-credential-signer and its generated-key tests.
         run: go test -count=1 -v ./...
+
+      - name: Build the runtime CIRCL signer outside the checkout
+        working-directory: crypto_interop/signer
+        run: go build -o "$RUNNER_TEMP/ra-credential-signer" ./cmd/ra-credential-signer
 
       - name: Execute upstream official RFC 9474 vectors
         working-directory: crypto_interop/signer
