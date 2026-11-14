@@ -39,3 +39,9 @@ crypto_interop/signer/crypto-test-signer*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Web UI dependencies and disposable test/build output
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
