@@ -1,0 +1,102 @@
+name: RSABSSA interoperability
+
+"on":
+  push:
+    branches:
+      - feat/blind-credential-anonymous-voting
+
+permissions:
+  contents: read
+
+jobs:
+  crypto-interop:
+    name: RFC vectors and TS-Go-Python gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      GOWORK: "off"
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Check out reviewed source without persistent credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+
+      - name: Set up Go 1.25
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.14"
+          cache: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11.9"
+
+      - name: Report actual toolchain versions
+        run: |
+          node --version
+          npm --version
+          go version
+          python --version
+
+      - name: Install fully pinned Python dependencies in a temporary environment
+        run: |
+          umask 077
+          python -m venv "$RUNNER_TEMP/rsabssa-python"
+          "$RUNNER_TEMP/rsabssa-python/bin/python" -m pip install --no-deps -r crypto_interop/requirements.lock.txt
+          "$RUNNER_TEMP/rsabssa-python/bin/python" -m pip check
+
+      - name: Install locked TypeScript dependencies and compile the real client
+        run: |
+          npm --prefix crypto_interop ci --ignore-scripts
+          npm --prefix crypto_interop run build
+
+      - name: Download and verify the locked CIRCL module
+        working-directory: crypto_interop/signer
+        run: |
+          go mod download github.com/cloudflare/circl
+          go mod verify
+
+      - name: Run existing Python and real TypeScript crypto tests
+        run: |
+          export EVOTE_TEST_NODE="$(command -v node)"
+          "$RUNNER_TEMP/rsabssa-python/bin/python" -m pytest crypto_interop/ -q
+
+      - name: Run native Go signer tests without test-result caching
+        working-directory: crypto_interop/signer
+        run: go test -count=1 -v ./...
+
+      - name: Execute upstream official RFC 9474 vectors
+        working-directory: crypto_interop/signer
+        run: go test -count=1 -v github.com/cloudflare/circl/blindsign/blindrsa -run '^TestVectors$'
+
+      - name: Build the test-only signer outside the checkout
+        working-directory: crypto_interop/signer
+        run: go build -o "$RUNNER_TEMP/rsabssa-signer" .
+
+      - name: Run full RFC and generated RSA-3072 interoperability and negative tests
+        # gate.py verifies original blinded bytes/length/hash and passes them
+        # to CIRCL BlindSign. SHA256 is never used as the signing message.
+        run: |
+          umask 077
+          "$RUNNER_TEMP/rsabssa-python/bin/python" crypto_interop/gate.py \
+            --node "$(command -v node)" \
+            --signer "$RUNNER_TEMP/rsabssa-signer"
+
+      - name: Reject dependency-lock changes
+        run: |
+          git diff --exit-code -- crypto_interop/package-lock.json crypto_interop/requirements.lock.txt crypto_interop/signer/go.mod crypto_interop/signer/go.sum
+          git diff --check

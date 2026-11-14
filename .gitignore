@@ -31,6 +31,11 @@ backups/
 .coverage
 htmlcov/
 
+# Crypto interoperability dependencies/builds; test secrets belong in OS temp.
+crypto_interop/node_modules/
+crypto_interop/dist/
+crypto_interop/signer/crypto-test-signer*
+
 # OS files
 .DS_Store
 Thumbs.db
