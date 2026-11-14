@@ -35,7 +35,7 @@ from scripts.ra_demo_db_test_support import (
     check,database_factory,prompt_password,validate_disposable_designation,verify_disposable_database,
 )
 
-HEAD="7b2d91a6c840"
+HEAD="c84e13b9702d"
 ISSUE="/api/v1/ra/credentials/issue"
 EXPORTED={"policy_for_session","reserve_request","lock_request","complete_request"}
 
@@ -171,6 +171,18 @@ def exercise(fixture,runtime,signer_binary,node):
             def post(index,data):
                 return http.post(ISSUE,json=data,headers={"Authorization":"Bearer "+tokens[index]})
 
+            def state(index,completed):
+                # Separate fixture transaction observes actual committed rows,
+                # including the audit rollback, before any recovery retry.
+                with fixture() as conn:
+                    params=(voters[index],election)
+                    check(conn.execute("SELECT count(*) FROM ra.credential_reservations WHERE voter_id=%s AND election_id=%s",params).fetchone()==(1,),
+                          "Durable reservation count mismatch")
+                    check(conn.execute("SELECT count(*) FROM ra.blind_issuances WHERE voter_id=%s AND election_id=%s",params).fetchone()==(completed,),
+                          "Committed issuance count mismatch")
+                    check(conn.execute("SELECT count(*) FROM ra.ra_audit_events WHERE voter_id=%s AND election_id=%s AND event_type='BLIND_ISSUANCE_ISSUED'",params).fetchone()==(completed,),
+                          "Issuance audit did not share completion transaction")
+
             prepared=prepare(); data=body(prepared)
             first=post(0,data)
             check(first.status_code==201,"Authorized issuance failed")
@@ -196,33 +208,42 @@ def exercise(fixture,runtime,signer_binary,node):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results=list(pool.map(lambda value:post(2,value).status_code,pair))
             check(sorted(results)==[201,409],"Concurrent independent requests were not exclusive")
+            state(2,1)
             exact=body(prepare())
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results=list(pool.map(lambda _:post(3,exact).status_code,range(2)))
             check(sorted(results)==[200,201],"Concurrent identical retries failed")
+            state(3,1)
             print("PASS: PostgreSQL concurrency for different and identical requests")
 
             for index,mode in ((4,"after_reservation"),(5,"before_commit"),(6,"after_commit")):
                 data=body(prepare()); store.mode=mode
                 check(post(index,data).status_code==503,"Injected failure reported success")
+                state(index,1 if mode=="after_commit" else 0)
                 store.mode=None
                 check(post(index,body(prepare())).status_code==409,"Failure released authorization")
                 check(post(index,data).status_code==(200 if mode=="after_commit" else 201),"Exact crash recovery failed")
+                state(index,1)
             original_sign=signer.sign
             data=body(prepare())
             service.signer=Mock(matches=Mock(return_value=True),sign=Mock(side_effect=CredentialUnavailable()))
             check(post(7,data).status_code==503,"Signer failure accepted")
+            state(7,0)
             check(post(7,body(prepare())).status_code==409,"Signer failure reset eligibility")
             service.signer=signer
             check(post(7,data).status_code==201,"Retry after signer failure failed")
+            state(7,1)
             def crash_after_sign(original):
                 original_sign(original)
                 raise CredentialUnavailable()
             service.signer=Mock(matches=Mock(return_value=True),sign=Mock(side_effect=crash_after_sign))
             data=body(prepare())
             check(post(8,data).status_code==503,"Lost signing response accepted")
+            state(8,0)
             service.signer=signer
+            check(post(8,body(prepare())).status_code==409,"Lost signing response reset authorization")
             check(post(8,data).status_code==201,"Crash after signing was not recoverable")
+            state(8,1)
             print("PASS: reservation/signing/commit crash boundaries and lost committed response recovery")
 
             with fixture() as conn:
@@ -276,6 +297,22 @@ def exercise(fixture,runtime,signer_binary,node):
             check({r[0] for r in rows if r[4]}==EXPORTED,"Unexpected runtime function surface")
             check(all(r[1] and r[2]=="ra_owner" and "search_path=pg_catalog,ra,pg_temp" in "".join("".join(r[3] or []).split())
                       for r in rows),"Unsafe definer function")
+            check(conn.execute("""SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a
+                WHERE n.nspname='ra_credential' AND a.grantee NOT IN
+                (p.proowner,(SELECT oid FROM pg_roles WHERE rolname='ra_issuance_login'))""").fetchone()==(0,),
+                "Unexpected function EXECUTE grants including PUBLIC")
+            for login in ("ra_auth_login","ra_issuance_login"):
+                check(conn.execute("SELECT has_schema_privilege(%s,'ra','USAGE'),has_schema_privilege(%s,'ra','CREATE')",
+                    (login,login)).fetchone()==(False,False),"General RA schema access allowed")
+                check(conn.execute("""SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                    WHERE n.nspname='ra' AND c.relkind IN ('r','p') AND
+                    (has_table_privilege(%s,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                    OR has_any_column_privilege(%s,c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))""",
+                    (login,login)).fetchone()==(0,),"Runtime table or column privilege allowed")
+                check(conn.execute("""SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                    WHERE n.nspname='ra' AND has_function_privilege(%s,p.oid,'EXECUTE')""",
+                    (login,)).fetchone()==(0,),"General RA function execution allowed")
         for sql in ("SELECT * FROM ra.voters LIMIT 0","SELECT * FROM ra.credential_reservations LIMIT 0",
                     "SELECT ra.find_active_session(repeat('a',64))","SELECT ra_credential._voter(repeat('a',64))",
                     "SET ROLE ra_owner","SET ROLE ra_migrator_login"):
@@ -295,7 +332,7 @@ def exercise(fixture,runtime,signer_binary,node):
                         cleanup(conn,voters,election)
 
 
-def main():
+def main(*,argv=None,password_prompt=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--disposable-fixture-writes",action="store_true",required=True)
     parser.add_argument("--database",required=True)
@@ -303,10 +340,13 @@ def main():
     parser.add_argument("--port",type=int,default=5432)
     parser.add_argument("--signer-binary",type=Path,required=True)
     parser.add_argument("--node",type=Path,required=True)
-    args=parser.parse_args()
+    args=parser.parse_args(argv)
     validate_disposable_designation(args.database,args.disposable_marker)
-    runtime_password=prompt_password("Disposable ra_issuance_login password: ")
-    fixture_password=prompt_password("Disposable fixture-only ra_migrator_login password: ")
+    # Dependency injection is confined to this manual/CI database TEST harness.
+    # CLI behavior remains interactive; no password flags or environment fallback.
+    collect=prompt_password if password_prompt is None else password_prompt
+    runtime_password=collect("Disposable ra_issuance_login password: ")
+    fixture_password=collect("Disposable fixture-only ra_migrator_login password: ")
     fixture=database_factory(fixture_password,database=args.database,port=args.port,fixture=True,
                              disposable_marker=args.disposable_marker)
     runtime=issuance_factory(runtime_password,database=args.database,marker=args.disposable_marker,port=args.port)
