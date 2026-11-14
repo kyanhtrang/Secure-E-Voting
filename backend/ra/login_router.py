@@ -11,6 +11,7 @@ from backend.ra.auth_service import (
     AuthenticationDenied,
     AuthenticationUnavailable,
 )
+from backend.ra.login_rate_limit import LoginRateLimited
 
 
 NO_CACHE_HEADERS = {
@@ -31,6 +32,18 @@ class SecureRALoginRoute(APIRoute):
                 return JSONResponse(
                     status_code=422,
                     content={"detail": "Invalid login request"},
+                    headers=NO_CACHE_HEADERS,
+                )
+            except HTTPException as exc:
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={"detail": exc.detail},
+                    headers={**(exc.headers or {}), **NO_CACHE_HEADERS},
+                )
+            except Exception:
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "Authentication unavailable"},
                     headers=NO_CACHE_HEADERS,
                 )
 
@@ -98,6 +111,12 @@ def login(
             status_code=503,
             detail="Authentication unavailable",
             headers=NO_CACHE_HEADERS,
+        ) from None
+    except LoginRateLimited as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts",
+            headers={**NO_CACHE_HEADERS, "Retry-After": str(exc.retry_after)},
         ) from None
     except Exception:
         # Fail closed without exposing internal errors.
