@@ -5,9 +5,11 @@ or databases. The dependency-verification entrypoint is entirely database-free.
 """
 
 import argparse
+import ast
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
+import hashlib
 import json
 import logging
 import os
@@ -28,7 +30,7 @@ from alembic.script import ScriptDirectory
 import psycopg
 from psycopg import sql
 from pydantic import SecretStr
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.pool import NullPool
 
 from scripts import voting_disposable_integration as integration
@@ -48,6 +50,61 @@ EXPECTED = {"rfc8785": "0.1.4", "psycopg": "3.3.9", "psycopg-binary": "3.3.9",
             "cryptography": "50.0.2", "fastapi": "0.162.4", "alembic": "1.20.1",
             "SQLAlchemy": "2.1.8", "Mako": "1.4.3"}
 check = integration.check
+
+
+class MigrationDiagnostics:
+    """Fixed labels only: never log SQL, bound values, messages, DETAIL or CONTEXT."""
+
+    STAGES = {"connect", "marker", "identity", "empty_schema", "alembic", "commit"}
+    ROUTINES = {"has_sequence_privilege_name_id", "has_sequence_privilege_id_id",
+                "has_sequence_privilege_id", "ExecGrant_Relation", "CheckFunctionValidatorAccess"}
+
+    def __init__(self, scripts):
+        self.stage, self.revision, self.statement = "connect", None, "not_started"
+        self._labels = {}
+        for script in scripts.walk_revisions(base="base", head=HEAD):
+            check(script.revision in CHAIN, "Unexpected diagnostic revision")
+            tree = ast.parse(Path(script.path).read_text(encoding="utf-8-sig"))
+            upgrade = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "upgrade")
+            literal = 0
+            for node in ast.walk(upgrade):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "op"
+                    and node.func.attr == "execute" and node.args
+                    and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                    literal += 1
+                    digest = hashlib.sha256(node.args[0].value.encode()).digest()
+                    self._labels[digest] = (script.revision, "upgrade_sql_"+str(literal).zfill(2))
+
+    def set_stage(self, stage):
+        check(stage in self.STAGES, "Unexpected migration diagnostic stage")
+        self.stage, self.statement = stage, "not_started"
+
+    def before_execute(self, connection, clauseelement, multiparams, params, execution_options):
+        # TextClause.text is the original Alembic op.execute literal, before
+        # driver percent escaping. SQL/parameters are used only for classification.
+        text = getattr(clauseelement, "text", None)
+        label = self._labels.get(hashlib.sha256(text.encode()).digest()) if isinstance(text, str) else None
+        if label is not None:
+            self.revision, self.statement = label
+        else:
+            self.statement = "alembic_internal_or_nonliteral"
+
+    def failure(self, error):
+        root = getattr(error, "orig", None) or error
+        state = getattr(root, "sqlstate", None)
+        state = state if isinstance(state, str) and re.fullmatch(r"[0-9A-Z]{5}", state) else "unavailable"
+        parts = ["FAIL: Voting migration", "stage="+self.stage,
+                 "revision="+(self.revision or "not_started"), "check="+self.statement, "SQLSTATE="+state]
+        diag = getattr(root, "diag", None)
+        # Even syntactically valid identifiers can encode secrets. Exact allowlists
+        # are required; arbitrary diagnostic strings and object names stay hidden.
+        for field, allowed in (("schema_name", {"voting", "pg_catalog"}), ("table_name", set(TABLES)),
+                               ("source_function", self.ROUTINES)):
+            value = getattr(diag, field, None)
+            if value:
+                parts.append(field+"="+(value if value in allowed else "redacted"))
+        return " ".join(parts)
 
 
 def verify_dependencies():
@@ -220,17 +277,30 @@ def migrate(target, password):
     scripts = ScriptDirectory.from_config(config)
     check(scripts.get_heads() == [HEAD] and tuple(revision.revision for revision in reversed(
         list(scripts.walk_revisions(base="base", head=HEAD)))) == CHAIN, "Unexpected Voting migration chain")
+    diagnostics = MigrationDiagnostics(scripts)
     engine = create_engine("postgresql+psycopg://", creator=lambda: connect(target, "voting_migrator_login", password),
                            poolclass=NullPool, echo=False, hide_parameters=True)
     try:
         with engine.begin() as connection:
+            diagnostics.set_stage("marker")
             integration.verify_database(connection.connection.driver_connection, target.database, target.marker)
+            diagnostics.set_stage("identity")
             check(connection.exec_driver_sql("SELECT current_database(),session_user,current_user,inet_server_port()").one()
                   == (target.database, "voting_migrator_login", "voting_migrator_login", 5432), "Migration identity mismatch")
+            diagnostics.set_stage("empty_schema")
             check(connection.exec_driver_sql("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='voting'").scalar_one() == 0,
                   "Migration schema is not empty")
             config.attributes.update(connection=connection, disposable_database=target.database, disposable_marker=target.marker)
-            command.upgrade(config, HEAD)  # Actual migrations, no stamping or reimplemented DDL.
+            diagnostics.set_stage("alembic")
+            event.listen(connection, "before_execute", diagnostics.before_execute)
+            try:
+                command.upgrade(config, HEAD)  # Actual migrations; diagnostics never rewrite or skip SQL.
+            finally:
+                event.remove(connection, "before_execute", diagnostics.before_execute)
+            diagnostics.set_stage("commit")
+    except Exception as error:
+        print(diagnostics.failure(error))
+        raise
     finally:
         engine.dispose()
     print("PASS: all three real Voting migrations committed; head " + HEAD)

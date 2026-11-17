@@ -229,6 +229,8 @@ def test_real_migration_chain_uses_only_existing_guarded_environment(monkeypatch
     connection.exec_driver_sql.return_value.one.return_value = (selected.database, "voting_migrator_login", "voting_migrator_login", 5432)
     connection.exec_driver_sql.return_value.scalar_one.return_value = 0
     monkeypatch.setattr(ci, "create_engine", Mock(return_value=engine))
+    monkeypatch.setattr(ci.event, "listen", Mock())  # The connection itself is a double.
+    monkeypatch.setattr(ci.event, "remove", Mock())
     marker = Mock()
     monkeypatch.setattr(integration, "verify_database", marker)
     def upgrade(config, head):
@@ -241,6 +243,8 @@ def test_real_migration_chain_uses_only_existing_guarded_environment(monkeypatch
     monkeypatch.setattr(ci.command, "upgrade", Mock(side_effect=upgrade))
     ci.migrate(selected, SecretStr("SYNTHETIC"))
     ci.command.upgrade.assert_called_once()
+    ci.event.listen.assert_called_once()
+    ci.event.remove.assert_called_once_with(*ci.event.listen.call_args.args)
     marker.assert_called_once_with(connection.connection.driver_connection, selected.database, selected.marker)
     engine.dispose.assert_called_once()
 
