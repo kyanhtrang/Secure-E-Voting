@@ -46,9 +46,13 @@ def credential_connection_factory(password):
     return connect
 
 
-def create_credential_app(auth_config, service, *, auth_connection_factory=None):
+def create_credential_app(auth_config, service, *, auth_connection_factory=None, catalogue=None):
     app = create_demo_app(auth_config, connection_factory=auth_connection_factory)
     app.include_router(router)
     app.dependency_overrides[get_credential_service] = lambda: service
     app.add_middleware(CredentialNoStore)
+    if catalogue is not None:
+        from backend.ra.election_catalogue import get_election_catalogue, router as catalogue_router
+        app.include_router(catalogue_router)
+        app.dependency_overrides[get_election_catalogue] = lambda: catalogue
     return app

@@ -2,7 +2,7 @@ name: Web UI foundation
 
 "on":
   push:
-    branches: [main, feat/web-ui-foundation]
+    branches: [main, feat/web-ui-foundation, feat/voter-voting-ui]
     paths: ["frontend/**", "backend/ra/**", "tests/demo_auth_helpers.py", ".github/workflows/web-ui.yml"]
   pull_request:
     paths: ["frontend/**", "backend/ra/**", "tests/demo_auth_helpers.py", ".github/workflows/web-ui.yml"]
@@ -35,7 +35,11 @@ jobs:
           "$RUNNER_TEMP/web-python/bin/python" -m pip check
           npm --prefix frontend ci --ignore-scripts
       - name: Compile and run component and API contract tests
+        env:
+          EVOTE_TEST_PYTHON: ${{ runner.temp }}/web-python/bin/python
         run: |
+          test -x "$EVOTE_TEST_PYTHON"
+          "$EVOTE_TEST_PYTHON" -c "import rfc8785; from backend.crypto.credential_protocol import verify_credential"
           npm --prefix frontend run build
           npm --prefix frontend test
       - name: Install browser and test real HTTP auth with a synthetic in-memory database
@@ -45,6 +49,7 @@ jobs:
         run: |
           npx --no-install playwright install --with-deps chromium
           npm run test:browser
+          npm run test:voting-browser
       - name: Keep dependency locks and source unchanged
         run: |
           git diff --exit-code

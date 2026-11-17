@@ -11,8 +11,16 @@ export function localTarget(value = 'http://127.0.0.1:8000'): string {
   return url.origin;
 }
 
+export function separateVotingTarget(ra: string, value='http://127.0.0.1:8001'): string {
+  const target=localTarget(value);
+  if ((new URL(ra).port || '80') === (new URL(target).port || '80')) throw new Error('RA and Voting require separate loopback ports.');
+  return target;
+}
+
 export default defineConfig(({ mode }) => {
   const enabled = mode === 'local-demo';
+  const raTarget=localTarget(process.env.RA_DEMO_TARGET);
+  const votingTarget=process.env.VITE_ENABLE_VOTING === 'true' ? separateVotingTarget(raTarget,process.env.VOTING_DEMO_TARGET) : localTarget(process.env.VOTING_DEMO_TARGET ?? 'http://127.0.0.1:8001');
   const headers = { 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' };
   // Preserve Host AND Origin. The existing backend checks that they agree;
@@ -21,6 +29,19 @@ export default defineConfig(({ mode }) => {
     '^/api/v1/ra/auth/(login|me|logout)$': {
       target: localTarget(process.env.RA_DEMO_TARGET), changeOrigin: false,
       xfwd: false, followRedirects: false,
+    },
+    '^/api/v1/ra/(elections|credentials/issue)$': {
+      target: localTarget(process.env.RA_DEMO_TARGET), changeOrigin:false, xfwd:false, followRedirects:false,
+    },
+    '^/api/v1/vote/ballots(/receipt)?$': {
+      target: votingTarget,
+      changeOrigin:false, xfwd:false, followRedirects:false,
+      configure(proxy: Parameters<NonNullable<import('vite').ProxyOptions['configure']>>[0]) {
+        // Do not silently strip a leaked identity header: reject the request.
+        proxy.on('proxyReq',(outgoing,incoming) => {
+          if (incoming.headers.authorization || incoming.headers.cookie || incoming.headers['proxy-authorization'] || incoming.headers['x-voter-id'] || incoming.headers['x-ra-token'] || incoming.headers['x-username'] || incoming.headers['x-request-id']) outgoing.destroy(new Error('Anonymous request required'));
+        });
+      },
     },
   } : undefined;
   return {

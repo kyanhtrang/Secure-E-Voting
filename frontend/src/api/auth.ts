@@ -1,3 +1,5 @@
+import { raFailure } from '../voting/api';
+
 export interface VoterIdentity { voter_id: string }
 export type ApiCode = 'disabled' | 'credentials' | 'expired' | 'unavailable' | 'invalid' | 'rate-limit' | 'cancelled';
 const messages: Record<ApiCode, string> = {
@@ -26,14 +28,19 @@ function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export type AuthClient = ReturnType<typeof createAuthClient>;
+export interface AuthClient {
+  login(username: string,password: string): Promise<VoterIdentity>;
+  me(): Promise<VoterIdentity>; logout(): Promise<void>; forget(): void;
+  elections?(): Promise<unknown>;
+  issue?(payload: { election_id: string; request_id: string; blinded_msg: string }): Promise<unknown>;
+}
 export function createAuthClient(enabled: boolean, transport: typeof fetch = (...args) => fetch(...args)) {
   // This closure is the sole token owner. No token getter, storage, URL or logger.
   let bearer: string | null = null;
   let epoch = 0;
   const active = new Set<AbortController>();
   function forget() { bearer = null; epoch++; for (const request of active) request.abort(); active.clear(); }
-  async function request(path: '/login' | '/me' | '/logout', method: 'GET' | 'POST', passwordBody?: string): Promise<{ response: Response; data: unknown }> {
+  async function request(path: '/login' | '/me' | '/logout' | '/elections' | '/issue', method: 'GET' | 'POST', passwordBody?: string): Promise<{ response: Response; data: unknown }> {
     if (!enabled) throw new ApiError('disabled');
     if (path !== '/login' && !bearer) throw new ApiError('expired');
     const controller = new AbortController(); active.add(controller);
@@ -42,10 +49,11 @@ export function createAuthClient(enabled: boolean, transport: typeof fetch = (..
       const headers: Record<string, string> = { Accept: 'application/json' };
       if (passwordBody !== undefined) headers['Content-Type'] = 'application/json';
       if (path !== '/login') headers.Authorization = 'Bearer ' + bearer;
-      const response = await transport(prefix + path, { method, headers, ...(passwordBody === undefined ? {} : { body: passwordBody }),
+      const url=path === '/elections' ? '/api/v1/ra/elections' : path === '/issue' ? '/api/v1/ra/credentials/issue' : prefix+path;
+      const response = await transport(url, { method, headers, ...(passwordBody === undefined ? {} : { body: passwordBody }),
         credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', signal: controller.signal });
       // Keep the abort deadline active through JSON reading; never parse error bodies.
-      const data: unknown = path !== '/logout' && response.status === 200 ? await response.json() : undefined;
+      const data: unknown = path !== '/logout' && (response.status === 200 || (path === '/issue' && response.status === 201)) ? await response.json() : undefined;
       return { response, data };
     } catch { throw new ApiError('unavailable'); }
     finally { clearTimeout(timeout); active.delete(controller); }
@@ -91,5 +99,16 @@ export function createAuthClient(enabled: boolean, transport: typeof fetch = (..
       if (response.status !== 204) reject(response);
     } finally { forget(); } // Network failure clears this device but is never a confirmed revocation.
   }
-  return { login, me, logout, forget };
+  async function votingRequest(path: '/elections' | '/issue', body?: string) {
+    const generation=epoch;
+    const {response,data}=await request(path,path === '/elections' ? 'GET' : 'POST',body);
+    if (epoch !== generation) throw new ApiError('cancelled');
+    if (response.status !== 200 && !(path === '/issue' && response.status === 201)) {
+      if (response.status === 401) forget();
+      raFailure(response.status);
+    }
+    return data;
+  }
+  return { login, me, logout, forget, elections:()=>votingRequest('/elections'),
+    issue:(payload: {election_id:string;request_id:string;blinded_msg:string})=>votingRequest('/issue',JSON.stringify({election_id:payload.election_id,request_id:payload.request_id,blinded_msg:payload.blinded_msg})) };
 }

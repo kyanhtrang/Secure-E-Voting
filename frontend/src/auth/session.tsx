@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ApiError, createAuthClient, safeError, type AuthClient, type VoterIdentity } from '../api/auth';
+import { FlowError } from '../voting/api';
 
 type Phase = 'anonymous' | 'signing-in' | 'checking' | 'authenticated' | 'unavailable';
 interface SessionState { phase: Phase; identity: VoterIdentity | null; message: string; checkedAt: Date | null; busy: boolean }
@@ -8,6 +9,8 @@ interface Session extends SessionState {
   login(username: string, password: string): Promise<void>;
   refresh(): Promise<void>;
   logout(): Promise<void>;
+  elections(): Promise<unknown>;
+  issue(payload: {election_id:string;request_id:string;blinded_msg:string}): Promise<unknown>;
 }
 const SessionContext = createContext<Session | null>(null);
 const initial: SessionState = { phase: 'anonymous', identity: null, message: '', checkedAt: null, busy: false };
@@ -61,7 +64,17 @@ export function SessionProvider({ enabled, children, client: supplied }: { enabl
     document.addEventListener('visibilitychange', focus);
     return () => { clearInterval(interval); window.removeEventListener('focus', focus); document.removeEventListener('visibilitychange', focus); };
   }, [state.phase, refresh]);
-  return <SessionContext value={{ ...state, enabled, login, refresh, logout }}>{children}</SessionContext>;
+  async function votingCall(action:()=>Promise<unknown>) {
+    try { return await action(); } catch (error) {
+      if ((error instanceof FlowError && error.code === 'session') || (error instanceof ApiError && error.code === 'expired')) {
+        client.forget(); operation.current++; if (mounted.current) setState({...initial,message:'Your session has ended. Please sign in again.'});
+      }
+      throw error;
+    }
+  }
+  const elections=useCallback(async()=>votingCall(()=>{ if (!client.elections) throw new ApiError('unavailable'); return client.elections(); }),[client]);
+  const issue=useCallback(async(payload: {election_id:string;request_id:string;blinded_msg:string})=>votingCall(()=>{ if (!client.issue) throw new ApiError('unavailable'); return client.issue(payload); }),[client]);
+  return <SessionContext value={{ ...state, enabled, login, refresh, logout, elections, issue }}>{children}</SessionContext>;
 }
 export function useSession(): Session {
   const session = useContext(SessionContext);

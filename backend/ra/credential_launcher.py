@@ -5,6 +5,7 @@ import getpass
 import warnings
 import os
 from pathlib import Path
+from uuid import UUID
 
 from cryptography.hazmat.primitives import serialization
 from pydantic import SecretStr
@@ -38,6 +39,8 @@ def main():
                         help="Independently trusted raw Ed25519 PUBLIC key (32 bytes)")
     parser.add_argument("--key-id", required=True)
     parser.add_argument("--recovery-key-id", required=True)
+    parser.add_argument("--publish-election", action="append", default=[], type=UUID,
+                        help="Explicit existing election UUID to publish from its real RA policy")
     args = parser.parse_args()
     signer = None
     try:
@@ -53,7 +56,9 @@ def main():
         del private
         service = CredentialIssuanceService(PostgreSQLCredentialStore(credential_connection_factory(password)),
             signer, CredentialRecovery({args.recovery_key_id: recovery_key}, args.recovery_key_id), pin)
-        app = create_credential_app(config, service)
+        from backend.ra.election_catalogue import ElectionCatalogue
+        catalogue = ElectionCatalogue(service.store, pin, args.publish_election)
+        app = create_credential_app(config, service, catalogue=catalogue)
         config.pop("RA_DEMO_DB_PASSWORD", None)
         uvicorn.run(app, host="127.0.0.1", port=8000, proxy_headers=False,
                     forwarded_allow_ips="", access_log=False, workers=1, log_level="warning", server_header=False)
