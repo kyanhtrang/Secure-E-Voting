@@ -11,9 +11,12 @@
     "preview": "vite preview",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "test:voting-browser": "playwright test --config playwright.voting.config.ts"
   },
   "dependencies": {
+    "@cloudflare/blindrsa-ts": "0.4.6",
+    "canonicalize": "5.1.0",
     "lucide-react": "1.73.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",

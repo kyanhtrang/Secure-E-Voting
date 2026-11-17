@@ -8,17 +8,19 @@ import { config, type AppConfig } from './config';
 import { AdminOverview, AdminSection } from './pages/admin';
 import { AnonymousVoting, BulletinBoard, PublicOverview, PublicResults, VerifyReceipt } from './pages/public';
 import { Credentials, ElectionDetail, Elections, Login, RequireSession, VoterOverview } from './pages/voter';
+import { VotingBallot, VotingCredentials, VotingElectionDetail, VotingElections } from './pages/voting';
+import { VotingProvider } from './voting/context';
 
 export function App({ settings = config, client }: { settings?: AppConfig; client?: AuthClient }) {
-  return <Routes>
+  const routes=<Routes>
     <Route path="/" element={<Navigate to="/voter" replace />} />
     <Route path="/voter" element={<SessionProvider enabled={settings.authEnabled} {...(client ? { client } : {})}><Shell workspace="voter" /></SessionProvider>}>
       <Route path="login" element={<Login />} />
       <Route element={<RequireSession />}>
-        <Route index element={<VoterOverview />} />
-        <Route path="elections" element={<Elections />} />
-        <Route path="elections/:electionId" element={<ElectionDetail />} />
-        <Route path="credentials" element={<Credentials />} />
+        <Route index element={<VoterOverview votingEnabled={settings.votingEnabled ?? false} />} />
+        <Route path="elections" element={settings.votingEnabled ? <VotingElections /> : <Elections />} />
+        <Route path="elections/:electionId" element={settings.votingEnabled ? <VotingElectionDetail /> : <ElectionDetail />} />
+        <Route path="credentials" element={settings.votingEnabled ? <VotingCredentials /> : <Credentials />} />
       </Route>
     </Route>
     <Route path="/admin" element={<Shell workspace="admin" />}>
@@ -28,9 +30,10 @@ export function App({ settings = config, client }: { settings?: AppConfig; clien
       <Route index element={<PublicOverview />} /><Route path="results/:electionId" element={<PublicResults />} />
       <Route path="board" element={<BulletinBoard />} /><Route path="verify" element={<VerifyReceipt />} />
     </Route>
-    <Route element={<Shell workspace="public" />}><Route path="/vote" element={<AnonymousVoting />} />
+    <Route element={<Shell workspace="public" />}><Route path="/vote" element={settings.votingEnabled ? <VotingBallot /> : <AnonymousVoting />} />
       <Route path="*" element={<><PageHeading eyebrow="PAGE NOT FOUND" title="This page isn’t available" description="Choose a workspace to continue." /><TextLink to="/public">Go to public elections</TextLink></>} /></Route>
   </Routes>;
+  return settings.votingEnabled ? <VotingProvider pin={settings.authorityPin ?? ''}>{routes}</VotingProvider> : routes;
 }
 export class AppBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };

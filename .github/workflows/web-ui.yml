@@ -2,7 +2,7 @@ name: Web UI foundation
 
 "on":
   push:
-    branches: [main, feat/web-ui-foundation]
+    branches: [main, feat/web-ui-foundation, feat/voter-voting-ui]
     paths: ["frontend/**", "backend/ra/**", "tests/demo_auth_helpers.py", ".github/workflows/web-ui.yml"]
   pull_request:
     paths: ["frontend/**", "backend/ra/**", "tests/demo_auth_helpers.py", ".github/workflows/web-ui.yml"]
@@ -14,6 +14,8 @@ jobs:
   web:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      EVOTE_TEST_PYTHON: ${{ runner.temp }}/web-python/bin/python
     defaults:
       run:
         shell: bash --noprofile --norc -euo pipefail {0}
@@ -45,6 +47,7 @@ jobs:
         run: |
           npx --no-install playwright install --with-deps chromium
           npm run test:browser
+          npm run test:voting-browser
       - name: Keep dependency locks and source unchanged
         run: |
           git diff --exit-code

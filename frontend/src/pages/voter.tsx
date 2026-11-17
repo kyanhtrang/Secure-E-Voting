@@ -67,21 +67,21 @@ export function Login() {
   </>;
 }
 
-export function VoterOverview() {
+export function VoterOverview({votingEnabled=false}: {votingEnabled?:boolean}) {
   const session = useSession();
   return <>
-    <PageHeading eyebrow="YOUR VOTER WORKSPACE" title="Ready when your election is." description="Your session is verified. Election access will appear here when the catalogue is connected.">
+    <PageHeading eyebrow="YOUR VOTER WORKSPACE" title="Ready when your election is." description={votingEnabled ? 'Choose a signed election, protect your request, then continue to separate anonymous voting.' : 'Your session is verified. Election access will appear here when the catalogue is connected.'}>
       <Badge tone="success">Session verified</Badge>
     </PageHeading>
     <div className="overview-hero"><div><span className="eyebrow">PARTICIPATE WITH CONFIDENCE</span><h2>One election. One credential.<br /><em>Your choice stays yours.</em></h2>
-      <p>Your RA session confirms who you are. Election eligibility is a separate check, and anonymous voting will use a separate credential.</p>
+      <p>Your RA session confirms who you are. Election eligibility is a separate check, and anonymous voting {votingEnabled ? 'uses' : 'will use'} a separate credential.</p>
       <TextLink to="/voter/elections">Explore election access</TextLink></div><div className="hero-seal" aria-hidden="true"><ShieldCheck size={65} strokeWidth={1.1} /><span>SECURE BY DESIGN</span></div></div>
     <div className="two-columns">
       <Panel title="Your participation journey" description="What works today, and what comes next.">
         <ol className="journey"><li className="complete"><span className="journey-icon"><CheckCircle2 size={19} /></span><div><strong>Verify your voter session</strong><p>Authenticated through the local Registration Authority.</p></div><Badge tone="success">Complete</Badge></li>
-          <li><span className="journey-icon"><CalendarDays size={19} /></span><div><strong>Choose an eligible election</strong><p>Requires an election catalogue and eligibility contract.</p></div><Badge>Pending</Badge></li>
-          <li><span className="journey-icon"><KeyRound size={19} /></span><div><strong>Prepare a voting credential</strong><p>Client blinding and protected recovery need browser integration.</p></div><Badge>Planned</Badge></li>
-          <li><span className="journey-icon"><Circle size={19} /></span><div><strong>Vote in the anonymous workspace</strong><p>Anonymous submission and verification are not available yet.</p></div><Badge>Planned</Badge></li></ol>
+          <li><span className="journey-icon"><CalendarDays size={19} /></span><div><strong>{votingEnabled ? 'Choose a verified election' : 'Choose an eligible election'}</strong><p>{votingEnabled ? 'Signed candidate catalogue; eligibility is checked by RA on issuance.' : 'Requires an election catalogue and eligibility contract.'}</p></div><Badge>{votingEnabled ? 'Available' : 'Pending'}</Badge></li>
+          <li><span className="journey-icon"><KeyRound size={19} /></span><div><strong>Prepare a voting credential</strong><p>{votingEnabled ? 'Encrypt locally, blind, and save protected recovery before issuance.' : 'Client blinding and protected recovery need browser integration.'}</p></div><Badge>{votingEnabled ? 'Available' : 'Planned'}</Badge></li>
+          <li><span className="journey-icon"><Circle size={19} /></span><div><strong>Vote in the anonymous workspace</strong><p>{votingEnabled ? 'Submit without RA authentication and verify the acceptance receipt.' : 'Anonymous submission and verification are not available yet.'}</p></div><Badge>{votingEnabled ? 'Available' : 'Planned'}</Badge></li></ol>
       </Panel>
       <Panel title="Session & access" description="The RA is the authority on session validity.">
         <div className="session-body"><div className="session-verified"><span><ShieldCheck size={24} /></span><div><strong>Verified local session</strong><small>RA identity confirmed</small></div></div>

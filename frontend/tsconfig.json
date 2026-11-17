@@ -20,5 +20,5 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
-  "include": ["src", "*.config.ts", "tests/browser"]
+  "include": ["src", "*.config.ts", "tests/browser", "tests/voting-browser"]
 }
