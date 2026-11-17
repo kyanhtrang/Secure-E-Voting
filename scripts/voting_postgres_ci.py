@@ -34,6 +34,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.pool import NullPool
 
 from scripts import voting_disposable_integration as integration
+from scripts.voting_integration_diagnostics import IntegrationDiagnostics
 
 
 # Same immutable official PostgreSQL 18 image already reviewed for Gate 2 CI.
@@ -313,17 +314,31 @@ def snapshot(conn):
 
 def run_harness(target, passwords):
     require_ci()
-    target.validate()
-    fixture = integration.factory(target.database, target.marker, target.port, passwords["voting_migrator_login"], fixture=True)
-    with fixture() as conn:
-        check(conn.execute("SELECT version_num FROM voting.alembic_version").fetchone() == (HEAD,), "Uncommitted migration head")
-        before = snapshot(conn)
-        check(all(not rows for rows in before.values()), "Fixture database must be fresh")
-    collected = iter(passwords[role] for role in LOGINS)
-    integration.main(argv=["--allow-disposable-database", "--database", target.database,
-        "--marker", target.marker, "--port", str(target.port)], password_prompt=lambda _: next(collected))
-    with fixture() as conn:
-        check(snapshot(conn) == before, "Committed Voting fixture cleanup failed")
+    diagnostics = IntegrationDiagnostics()
+    try:
+        target.validate()
+        fixture = integration.factory(target.database, target.marker, target.port, passwords["voting_migrator_login"], fixture=True)
+        with fixture() as conn:
+            check(conn.execute("SELECT version_num FROM voting.alembic_version").fetchone() == (HEAD,), "Uncommitted migration head")
+            diagnostics.set_stage("initial_snapshot")
+            before = snapshot(conn)
+            check(all(not rows for rows in before.values()), "Fixture database must be fresh")
+        collected = iter(passwords[role] for role in LOGINS)
+        diagnostics.set_stage("fixture_seed")
+        integration.main(argv=["--allow-disposable-database", "--database", target.database,
+            "--marker", target.marker, "--port", str(target.port)], password_prompt=lambda _: next(collected),
+            diagnostics=diagnostics)
+        diagnostics.set_stage("final_snapshot")
+        with fixture() as conn:
+            check(snapshot(conn) == before, "Committed Voting fixture cleanup failed")
+    except SystemExit as error:
+        if not diagnostics.failures:
+            diagnostics.report(error)
+        # An unexpected SystemExit(0) from the harness must not turn a failed gate green.
+        raise RuntimeError("Voting integration terminated") from None
+    except Exception as error:
+        diagnostics.report(error)
+        raise
     print("PASS: real Voting harness and committed fixture cleanup")
 
 

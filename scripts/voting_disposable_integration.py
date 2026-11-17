@@ -27,6 +27,7 @@ from backend.voting.ballot_service import BallotService, VotingUnavailable
 from backend.voting.local_launcher import create_voting_app
 from backend.voting.postgres_ballot_store import PostgreSQLBallotStore
 from tests.voting_helpers import material, payload_for
+from scripts.voting_integration_diagnostics import IntegrationDiagnostics
 
 
 def check(condition, label):
@@ -123,7 +124,9 @@ def await_lock_wait(observer, blocker):
     raise AssertionError("Expected PostgreSQL election-lock contention did not occur")
 
 
-def run(fixture, runtime, database, marker):
+def run(fixture, runtime, database, marker, *, diagnostics=None):
+    diagnostics = diagnostics if diagnostics is not None else IntegrationDiagnostics()
+    diagnostics.set_stage("fixture_seed")
     value = material()  # Generated TEST keys in memory only. No actual RA credential is consumed.
     election = value.manifest["election_id"]
     created = []
@@ -141,6 +144,7 @@ def run(fixture, runtime, database, marker):
                 response = http.post(URL, json=payload)
                 return response.status_code
 
+        diagnostics.set_stage("concurrency_20")
         with ThreadPoolExecutor(max_workers=20) as pool:
             results = list(pool.map(vote, range(20)))
         check(results.count(201) == 1 and results.count(409) == 19, "20-way serial uniqueness failed")
@@ -148,11 +152,14 @@ def run(fixture, runtime, database, marker):
             check(conn.execute("SELECT count(*) FROM voting.accepted_ballots WHERE election_id=%s", (election,)).fetchone()
                   == (1,), "Unexpected ballot count")
         with client(service) as http:
+            diagnostics.set_stage("duplicate_retry")
             check(http.post(URL, json=payload).status_code == 409, "Retry inserted a second ballot")
+            diagnostics.set_stage("receipt_recovery")
             recovered = http.post(URL+"/receipt", json=payload)
             expected = service.verify(payload).receipt_hash.hex()
             check(recovered.status_code == 200 and recovered.json()["receipt_hash"] == expected,
                   "Lost-response recovery or SQL/Python receipt interoperability failed")
+            diagnostics.set_stage("identity_and_signature_rejection")
             for field in ("voter_id", "username", "request_id", "ra_token"):
                 check(http.post(URL, json={**payload, field: "SYNTHETIC_CANARY"}).status_code == 422,
                       "Identity metadata accepted")
@@ -174,6 +181,7 @@ def run(fixture, runtime, database, marker):
         with client(service) as http:
             check(http.post(URL, json=payload_for(value)).status_code == 201, "Identical candidate choice rejected")
 
+        diagnostics.set_stage("rollback")
         rollback_payload = payload_for(value)
         ballot = service.verify(rollback_payload)
         try:
@@ -186,6 +194,7 @@ def run(fixture, runtime, database, marker):
             check(http.post(URL+"/receipt", json=rollback_payload).status_code == 404, "Rollback retained a receipt")
             check(http.post(URL, json=rollback_payload).status_code == 201, "Rolled-back serial consumed")
 
+        diagnostics.set_stage("lost_response")
         # Execute COMMIT for real, then inject response loss at the application boundary.
         class LostResponseStore(PostgreSQLBallotStore):
             def accept(self, ballot):
@@ -198,6 +207,7 @@ def run(fixture, runtime, database, marker):
             check(http.post(URL+"/receipt", json=lost_payload).status_code == 200, "Committed response loss unrecoverable")
             check(http.post(URL, json=lost_payload).status_code == 409, "Response loss allowed another acceptance")
 
+        diagnostics.set_stage("closing_first_race")
         # Closing wins the election lock. This is a controlled lock race, not a timing-only sleep.
         blocked = threading.Event()
         race_payload = payload_for(value)
@@ -217,6 +227,7 @@ def run(fixture, runtime, database, marker):
         with client(service) as http:
             check(http.post(URL+"/receipt", json=payload).status_code == 200, "Closed election prevented recovery")
 
+        diagnostics.set_stage("acceptance_first_race")
         # Acceptance wins the lock; closing must wait for its commit.
         with fixture() as conn:
             conn.execute("UPDATE voting.elections SET status='OPEN' WHERE election_id=%s", (election,))
@@ -234,6 +245,7 @@ def run(fixture, runtime, database, marker):
                     await_lock_wait(observer, blocker)
             future.result(timeout=20)
 
+        diagnostics.set_stage("election_time")
         # OPEN status alone is insufficient; DB time must enforce both boundaries.
         for opening, closing in ((-7200, -3600), (3600, 7200)):
             timed = material(opens_offset=opening, closes_offset=closing)
@@ -244,6 +256,7 @@ def run(fixture, runtime, database, marker):
             with client(timed_service) as http:
                 check(http.post(URL, json=payload_for(timed)).status_code == 409, "Database voting window ignored")
 
+        diagnostics.set_stage("acl_verification")
         # Effective privileges and ownership, including helpers and other workers.
         with fixture() as conn:
             rows = conn.execute("""SELECT p.proname,r.rolname,p.prosecdef,p.proconfig,
@@ -291,10 +304,13 @@ def run(fixture, runtime, database, marker):
             else:
                 raise AssertionError("Frozen policy mutation succeeded")
         print("PASS: 20-way uniqueness, duplicate retry, receipts, rollback, closing races, DB time, identity rejection and ACLs")
+    except (Exception, SystemExit) as error:
+        diagnostics.report(error)  # Capture the original phase BEFORE cleanup changes it.
+        raise
     finally:
         if created:
             # No shared fixture, voter or unrelated ballot is ever deleted.
-            with fixture() as conn:
+            with diagnostics.at("cleanup"), fixture() as conn:
                 verify_database(conn, database, marker)
                 for own_election in created:
                     conn.execute("DELETE FROM voting.accepted_ballots WHERE election_id=%s", (own_election,))
@@ -304,21 +320,25 @@ def run(fixture, runtime, database, marker):
                           "Fixture cleanup failed")
 
 
-def main(argv=None, *, password_prompt=None):
+def main(argv=None, *, password_prompt=None, diagnostics=None):
     parser = argparse.ArgumentParser(description="Manual marked-disposable Voting integration only")
     parser.add_argument("--allow-disposable-database", action="store_true", required=True)
     parser.add_argument("--database", required=True)
     parser.add_argument("--marker", required=True)
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args(argv)
+    diagnostics = diagnostics if diagnostics is not None else IntegrationDiagnostics()
+    diagnostics.set_stage("fixture_seed")
     try:
         designation(args.database, args.marker)  # Before prompting or connecting.
         collect = password if password_prompt is None else password_prompt
         owner = collect("Disposable voting_migrator_login password: ")
         limited = collect("Disposable voting_ballot_login password: ")
         run(factory(args.database, args.marker, args.port, owner, fixture=True),
-            factory(args.database, args.marker, args.port, limited), args.database, args.marker)
-    except Exception:
+            factory(args.database, args.marker, args.port, limited), args.database, args.marker,
+            diagnostics=diagnostics)
+    except Exception as error:
+        diagnostics.report(error)  # Emit the safe record before argparse converts to SystemExit.
         parser.exit(1, "FAIL: disposable Voting integration (details suppressed to protect credentials)\n")
 
 
