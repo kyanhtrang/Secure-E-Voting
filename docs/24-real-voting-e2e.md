@@ -1,9 +1,10 @@
 # Real browser / RA / CIRCL / Voting / PostgreSQL gate
 
-Status: implemented for human review; **the new real-service gate has NOT RUN**.
-Do not treat the existing synthetic browser tests or the database-free safety
-tests as evidence that this combined journey passed. The first Ubuntu run is
-required before making that claim.
+Status: **Run #1 failed during `response_loss` after `issued`**. User-provided CI
+evidence confirms native CIRCL, all 14 RA / 3 Voting migrations, the full accepted
+scenario (including ACL/cleanup) and issuance replay passed. The complete real
+gate has not passed. The targeted transport correction below requires another
+Ubuntu run. Synthetic browser/transport and database-free tests are separate evidence.
 
 ## Architecture and isolation
 
@@ -99,9 +100,11 @@ by the existing reviewed container configuration.
 ## Scenarios and database assertions
 
 The [Chromium driver](../frontend/tests/real-voting.mjs) uses actual application
-screens, real HTTP responses and browser crypto. Its `route.fetch()` fault
-injection forwards the original request to the real backend; only the resulting
-HTTP response is dropped with `route.abort()`. No `route.fulfill()` is used.
+screens, real HTTP responses and browser crypto. RA response-loss injection uses
+`route.fetch()`. Voting response-loss injection uses an isolated API request
+context with an empty cookie jar to forward the unchanged original request.
+Only the real resulting HTTP response is dropped with `route.abort()` after
+the database checkpoint. No `route.fulfill()` is used.
 There is no fixture-control HTTP endpoint: privileged test actions occur only at
 private coordinator checkpoints.
 
@@ -199,22 +202,24 @@ credential downloads, private keys, SQL dumps or logs are uploaded. The artifact
 is `real-voting-public-previews` with three-day retention. The upload action is
 pinned to the [official v7.0.2 commit](https://github.com/actions/upload-artifact/commit/cf430e030ddbb5b0abf93d22962f4752f3646cd9).
 
-**No real-gate screenshots or real database/cleanup PASS evidence exist yet.**
-They can only be produced by the first successful hosted run; old synthetic
-screenshots are not substituted.
+Run #1 provides accepted-scenario database/cleanup PASS evidence, but failed
+before the remaining scenarios completed. No successful full-run artifact upload
+is claimed. Another full hosted run is required; old synthetic screenshots are
+not substituted for it.
 
 ## Actual local validation and limits
 
-- Complete database-free Python backend/crypto suite: **655 passed**, including
-  34 new safety-boundary tests. These use test doubles solely to verify guard and
+- Complete database-free Python backend/crypto suite: **671 passed**, including
+  50 gate safety-boundary tests. These use test doubles solely to verify guard and
   private-protocol rejection behavior, not as real-gate evidence.
 - Frontend unit/component/crypto tests: **78 passed**.
-- Existing authentication browser suite: **7 passed**; existing synthetic voting
-  browser suite: **3 passed**, both in local Edge. They remain separate evidence.
+- Existing authentication browser suite: **7 passed**; voting browser suite:
+  **7 passed** (3 existing synthetic voting scenarios plus 4 new anonymous
+  forwarding transport regressions), all in local Edge. They remain separate evidence.
 - Existing TypeScript recovery tests: **2 passed**.
 - Frontend TypeScript checks/production build, JavaScript/Python/YAML/Bash syntax,
   Python dependency verification, changed-source secret scan and diff checks:
-  **PASS** (all five new files scanned; six workflow Bash blocks checked). The
+  **PASS** (changed files scanned; six workflow Bash blocks checked). The
   standalone real browser driver also refused Windows with only a sanitized
   failure event, before launching a browser. The existing SJCL fallback
   externalization warning remains; browser WebCrypto regression passed.
@@ -245,9 +250,9 @@ Two confirmed workflow issues were corrected:
    [context availability table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
 
 Two added regression tests enforce the exact trigger set and Python-path setup
-ordering/context. This review changed the workflow, safety tests and this report.
-The coordinator and browser driver were inspected and remain byte-for-byte
-unchanged from the five-file implementation presented for review.
+ordering/context. That pre-publication review changed the workflow, safety tests
+and this report. The coordinator and browser driver were then unchanged; the
+subsequent Run #1 correction below changes their test transport/diagnostics only.
 
 Publication inventory:
 
@@ -261,5 +266,62 @@ Safety review found no additional confirmed defect in the target files. The
 hosted-runner, owned-container, independent database designation, separate
 credentials/processes, native signer, sanitized logging, fail-closed assertions,
 bounded cleanup and successful-cleanup-only public PNG upload controls remain.
-These are source/guard-test findings, not a claim that real hosted E2E execution
-or teardown has passed. The first full Ubuntu run remains required.
+These are source/guard-test findings, not a claim that the complete real hosted
+E2E gate passed. Another full Ubuntu run remains required.
+
+## Run #1 response-loss correction
+
+Confirmed deterministic harness defect: pinned Playwright's `route.fetch()`
+uses the browser-context API request client. When the original browser request
+omits cookies, that client populates a Cookie header from the shared browser
+jar. The driver deliberately installs an identity canary before voting. Native
+browser fetch correctly omits it, so `accepted` works; interception can add it
+back during `response_loss`. The strict anonymous proxy/API should reject that
+request. This is not an application authorization/cryptography defect.
+
+Source evidence: the installed 1.65.1 implementation delegates Route.fetch to
+`this._context.request._innerFetch`, whose request transport calls
+`_updateRequestCookieHeader` if the Cookie header is absent. A local, database-free
+HTTP transport probe reproduced original browser cookie omission, cookie
+injection by route.fetch (probe status 400), and successful cookie-free isolated
+forwarding (probe status 201). Run #1 did not report its actual forwarding status,
+so that specific CI status and the full fix remain subject to the rerun.
+
+The small [anonymous forwarder](../frontend/tests/anonymous-forward.mjs) creates
+a new isolated API request context with no cookies/storage state, forwards the
+original method/body/headers without redirects or retries, and disposes it after
+response inspection. It refuses original identity headers instead of stripping
+them. The browser canary stays installed. Four
+[transport regressions](../frontend/tests/voting-browser/anonymous-forwarding.spec.mjs)
+exercise the actual helper, cookie preservation, exact dummy body forwarding and
+rejection of original Cookie/Authorization/voter headers. The probe is neither a
+Voting service nor evidence of a real PostgreSQL/CIRCL run.
+
+Six allowlisted progress stages cover only the failing response-loss interval:
+
+```text
+INFO: real_voting_e2e stage=anonymous_navigation
+INFO: real_voting_e2e stage=anonymous_ready
+INFO: real_voting_e2e stage=submission_triggered
+INFO: real_voting_e2e stage=voting_request_intercepted
+INFO: real_voting_e2e stage=voting_forward_completed http_status=201
+PASS: real_voting_e2e checkpoint=committed_response_lost
+INFO: real_voting_e2e stage=voting_response_loss_injected
+```
+
+These are expected future lines, not results from a rerun. Unexpected forwarding
+status example (response body is never read/logged for diagnostics):
+
+```text
+FAIL: real_voting_e2e stage=voting_forward_completed category=assertion_error sqlstate=unavailable http_status=503
+```
+
+Only fixed allowlisted HTTP codes are printable; other codes map to the literal
+`unavailable`. Route callback failures explicitly emit the same sanitized failure
+protocol, avoiding raw/unhandled error dumps. Progress messages do not receive
+ACKs, query databases, or replace any existing database checkpoint; all original
+receipt, double-vote, native signer, migration, ACL and cleanup assertions remain.
+Production UI/API behavior, workflow, dependency locks and frozen crypto are unchanged.
+
+Changed files for Run #1: browser driver, isolated forwarder (new), transport
+regressions (new), coordinator diagnostics, safety tests and this report.

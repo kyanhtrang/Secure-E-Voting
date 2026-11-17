@@ -205,3 +205,49 @@ def test_runner_python_path_is_initialized_on_runner_before_subsequent_steps():
     assert '"$EVOTE_TEST_PYTHON"' not in script  # GITHUB_ENV applies only to later steps.
     assert job["steps"].index(install) < next(i for i,step in enumerate(job["steps"])
         if '"$EVOTE_TEST_PYTHON"' in step.get("run",""))
+
+
+def test_response_loss_diagnostics_have_only_the_six_requested_stages():
+    assert gate.BROWSER_DIAGNOSTICS == {"anonymous_navigation","anonymous_ready","submission_triggered",
+        "voting_request_intercepted","voting_forward_completed","voting_response_loss_injected"}
+    assert not (gate.BROWSER_DIAGNOSTICS & gate.EVENTS)  # Existing DB checkpoints stay separate.
+
+
+def diagnostic_process(monkeypatch,messages):
+    process=Mock(stdin=io.StringIO(),stdout=io.StringIO(''.join(json.dumps(m)+'\n' for m in messages)))
+    @contextmanager
+    def child(*_args,**_kwargs):yield process
+    monkeypatch.setattr(gate,"child",child)
+    database=Mock();monkeypatch.setattr(gate,"assert_database",database)
+    return process,database
+
+
+@pytest.mark.parametrize("stage", sorted(gate.BROWSER_DIAGNOSTICS))
+def test_safe_progress_has_no_ack_or_database_side_effect_and_failure_reaches_runner(monkeypatch,capsys,stage):
+    process,database=diagnostic_process(monkeypatch,[{"event":"diagnostic","stage":stage},
+        {"event":"failure","stage":stage,"http_status":503}])
+    current=["browser"]
+    with pytest.raises(AssertionError) as caught:
+        gate.browser(Path("node"),{"scenario":"response_loss"},None,None,None,current)
+    assert current==[stage]
+    assert gate.failure(current[0],caught.value)==f"FAIL: real_voting_e2e stage={stage} category=assertion_error sqlstate=unavailable http_status=503"
+    database.assert_not_called()
+    assert len(process.stdin.getvalue().splitlines())==1  # Initial configuration only.
+    assert capsys.readouterr().out==f"INFO: real_voting_e2e stage={stage}\n"
+
+
+@pytest.mark.parametrize("extra", [{"stage":"SECRET_CANARY"},{"http_status":"SECRET_CANARY"},
+    {"http_status":418},{"receipt_hash":"SECRET_CANARY"}])
+def test_progress_rejects_unallowlisted_fields_without_disclosing_them(monkeypatch,capsys,extra):
+    diagnostic_process(monkeypatch,[{"event":"diagnostic","stage":"voting_forward_completed",**extra}])
+    with pytest.raises(AssertionError):gate.browser(Path("node"),{"scenario":"response_loss"},None,None,None,["browser"])
+    assert capsys.readouterr().out==''
+
+
+@pytest.mark.parametrize("status", [503,"unavailable","SECRET_CANARY",418,True])
+def test_failure_http_status_is_a_closed_allowlist(status):
+    error=AssertionError("SECRET_CANARY");error.http_status=status
+    output=gate.failure("voting_forward_completed",error)
+    assert "SECRET_CANARY" not in output
+    if status in (503,"unavailable"):assert output.endswith(" http_status="+str(status))
+    else:assert "http_status" not in output

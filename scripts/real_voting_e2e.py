@@ -54,7 +54,10 @@ SCENARIOS = ("accepted", "response_loss", "closed_first")
 EVENTS = frozenset({"catalogue", "prepared", "issuance_response_lost", "issued",
     "before_submit_close", "committed_response_lost", "accepted", "recovered",
     "security_checks", "close_after_accept", "closed_recovery", "rejected_closed"})
-STAGES = EVENTS | {"preflight", "provision", "migrations", "seed", "services", "browser", "acl", "cleanup", "teardown"}
+BROWSER_DIAGNOSTICS = frozenset({"anonymous_navigation", "anonymous_ready", "submission_triggered",
+    "voting_request_intercepted", "voting_forward_completed", "voting_response_loss_injected"})
+HTTP_STATUSES = frozenset({200,201,204,400,401,403,404,409,413,415,422,429,500,502,503,504})
+STAGES = EVENTS | BROWSER_DIAGNOSTICS | {"preflight", "provision", "migrations", "seed", "services", "browser", "acl", "cleanup", "teardown"}
 
 
 def require_ci():
@@ -76,7 +79,10 @@ def failure(stage, error):
     root = getattr(error, "orig", None) or error
     state = getattr(root, "sqlstate", None)
     state = state if isinstance(state, str) and re.fullmatch(r"[0-9A-Z]{5}", state) else "unavailable"
-    return f"FAIL: real_voting_e2e stage={stage} category={category} sqlstate={state}"
+    status = getattr(error,"http_status",None)
+    suffix = (" http_status="+str(status) if stage in BROWSER_DIAGNOSTICS
+        and (type(status) is int and status in HTTP_STATUSES or status == "unavailable") else "")
+    return f"FAIL: real_voting_e2e stage={stage} category={category} sqlstate={state}"+suffix
 
 
 def guarded(factory, target, owner, login, *, fixture=False):
@@ -351,15 +357,29 @@ def browser(node, configuration, db, voter, election, stage):
                 except queue.Full: pass
         threading.Thread(target=read,daemon=True).start()
         seen = []
+        diagnostic_stages = set()
         while True:
             line = lines.get(timeout=90)
             check(line is not None and len(line) <= 4096, "Browser protocol ended unexpectedly")
             message = json.loads(line)
-            check(type(message) is dict and set(message) <= {"event", "receipt_hash", "stage"}, "Unexpected browser diagnostic")
+            check(type(message) is dict and set(message) <= {"event", "receipt_hash", "stage", "http_status"}, "Unexpected browser diagnostic")
             event = message.get("event")
+            if event in {"diagnostic","failure"}:
+                status = message.get("http_status")
+                check(status is None or (type(status) is int and status in HTTP_STATUSES)
+                      or status == "unavailable", "Unallowlisted browser HTTP status")
+            if event == "diagnostic":
+                check(configuration["scenario"] == "response_loss" and message.get("stage") in BROWSER_DIAGNOSTICS
+                    and set(message) <= {"event","stage","http_status"}, "Unallowlisted browser progress")
+                stage[0] = message["stage"]
+                diagnostic_stages.add(stage[0])
+                print("INFO: real_voting_e2e stage="+stage[0]+(" http_status="+str(status) if status is not None else ""))
+                continue  # Progress only: no ACK, database assertion or checkpoint replacement.
             if event == "failure":
                 stage[0] = message.get("stage") if message.get("stage") in STAGES else "browser"
-                raise AssertionError("Real browser assertion failed; details withheld")
+                error = AssertionError("Real browser assertion failed; details withheld")
+                if status is not None: error.http_status = status
+                raise error
             if event == "done": break
             check(event in EVENTS, "Browser assertion failed; details withheld")
             stage[0] = event
@@ -379,6 +399,7 @@ def browser(node, configuration, db, voter, election, stage):
                      {"accepted","security_checks","close_after_accept","closed_recovery"})
         if configuration["scenario"] == "response_loss":
             expected |= {"issuance_response_lost","committed_response_lost","recovered"}
+            check(diagnostic_stages == BROWSER_DIAGNOSTICS, "Required browser diagnostics missing")
         check(set(seen) == expected, "Required real browser checkpoint missing")
 
 

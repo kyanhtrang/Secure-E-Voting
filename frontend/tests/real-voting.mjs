@@ -4,6 +4,11 @@ import { createInterface } from 'node:readline';
 import { join, isAbsolute } from 'node:path';
 import { chromium, expect } from '@playwright/test';
 import { receipt, unb64 } from '../src/voting/crypto.ts';
+import { withAnonymousForward } from './anonymous-forward.mjs';
+
+const DIAGNOSTIC_STAGES=['anonymous_navigation','anonymous_ready','submission_triggered',
+  'voting_request_intercepted','voting_forward_completed','voting_response_loss_injected'];
+const HTTP_STATUSES=new Set([200,201,204,400,401,403,404,409,413,415,422,429,500,502,503,504]);
 
 const lines=createInterface({input:process.stdin,crlfDelay:Infinity})[Symbol.asyncIterator]();
 async function read() {
@@ -11,7 +16,17 @@ async function read() {
   if(result.done || result.value.length>8192)throw new Error('Control unavailable');
   return JSON.parse(result.value);
 }
-let stage='browser', browser;
+let stage='browser', browser, httpStatus, failureReported=false;
+function diagnostic(next,status) {
+  if(!DIAGNOSTIC_STAGES.includes(next))throw new Error('Unknown diagnostic stage');
+  stage=next;httpStatus=status===undefined ? undefined : HTTP_STATUSES.has(status) ? status : 'unavailable';
+  process.stdout.write(JSON.stringify({event:'diagnostic',stage,...(httpStatus===undefined ? {} : {http_status:httpStatus})})+'\n');
+}
+function reportFailure() {
+  if(failureReported)return;
+  failureReported=true;process.exitCode=1;
+  process.stdout.write(JSON.stringify({event:'failure',stage,...(httpStatus===undefined ? {} : {http_status:httpStatus})})+'\n');
+}
 async function checkpoint(event,receipt_hash) {
   stage=event;
   process.stdout.write(JSON.stringify({event,...(receipt_hash ? {receipt_hash} : {})})+'\n');
@@ -111,20 +126,40 @@ try {
   for(const request of issuance)expect(request).toEqual(issuance[0]);
   expect(issuance[0].election_id).toBe(config.election_id);
   await checkpoint('issued');
+  const mark=(next,status)=>{if(config.scenario==='response_loss')diagnostic(next,status);};
+  mark('anonymous_navigation');
   await page.getByRole('link',{name:'Continue to anonymous voting'}).click();
+  await expect(page).toHaveURL(config.origin+'/vote');
+  await expect(page.getByRole('heading',{name:'Submit your sealed ballot'})).toBeVisible();
+  await expect(page.getByRole('checkbox',{name:/I confirm submission/})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Submit ballot',exact:true})).toBeVisible();
+  mark('anonymous_ready');
   await context.addCookies([{name:'ra_identity_canary',value:'synthetic-private-cookie',url:config.origin}]);
 
   if(config.scenario==='closed_first')await checkpoint('before_submit_close');
   let committedReceipt;
   if(config.scenario==='response_loss') {
     await page.route('**/api/v1/vote/ballots',async route=>{
-      const response=await route.fetch();expect(response.status()).toBe(201);
-      committedReceipt=(await response.json()).receipt_hash;
-      await checkpoint('committed_response_lost',committedReceipt);await route.abort('failed');
+      try {
+        mark('voting_request_intercepted');
+        await withAnonymousForward(route,async response=>{
+          mark('voting_forward_completed',response.status());
+          expect(response.status()).toBe(201);
+          committedReceipt=(await response.json()).receipt_hash;
+          await checkpoint('committed_response_lost',committedReceipt);
+          await route.abort('failed');mark('voting_response_loss_injected');
+        });
+      } catch {
+        reportFailure(); // Route callback failures must reach the coordinator safely.
+        await route.abort('failed').catch(()=>{});
+      }
     });
   }
   const responsePromise=config.scenario==='response_loss' ? null : page.waitForResponse(r=>new URL(r.url()).pathname==='/api/v1/vote/ballots');
   await page.getByRole('checkbox',{name:/I confirm submission/}).check();
+  await expect(page.getByRole('checkbox',{name:/I confirm submission/})).toBeChecked();
+  await expect(page.getByRole('button',{name:'Submit ballot',exact:true})).toBeEnabled();
+  mark('submission_triggered');
   await page.getByRole('button',{name:'Submit ballot',exact:true}).click();
   if(config.scenario==='closed_first') {
     expect((await responsePromise).status()).toBe(409);
@@ -182,8 +217,7 @@ try {
   process.stdout.write('{"event":"done"}\n');
 } catch {
   // Never emit Playwright expectation messages, DOM, request objects or stacks.
-  process.stdout.write(JSON.stringify({event:'failure',stage})+'\n');
-  process.exitCode=1;
+  reportFailure();
 } finally {
   if(browser)await browser.close().catch(()=>{});
   process.stdin.destroy();
