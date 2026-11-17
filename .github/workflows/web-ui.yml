@@ -14,8 +14,6 @@ jobs:
   web:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      EVOTE_TEST_PYTHON: ${{ runner.temp }}/web-python/bin/python
     defaults:
       run:
         shell: bash --noprofile --norc -euo pipefail {0}
