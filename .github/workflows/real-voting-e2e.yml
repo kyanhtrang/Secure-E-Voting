@@ -1,0 +1,88 @@
+name: Real browser RA CIRCL PostgreSQL voting
+
+"on":
+  push:
+    branches: [feat/voter-voting-ui]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-voting-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      GOWORK: "off"
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.14"
+          cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11.9"
+      - name: Install and verify locked dependencies
+        run: |
+          umask 077
+          e2e_python="$RUNNER_TEMP/real-e2e-python/bin/python"
+          printf 'EVOTE_TEST_PYTHON=%s\n' "$e2e_python" >> "$GITHUB_ENV"
+          python -m venv "$RUNNER_TEMP/real-e2e-python"
+          "$e2e_python" -m pip install --no-deps -r backend/voting/requirements.lock.txt
+          "$e2e_python" -m pip check
+          "$e2e_python" scripts/voting_postgres_ci.py --verify-dependencies
+          npm --prefix frontend ci --ignore-scripts
+          npm --prefix crypto_interop ci --ignore-scripts
+          npm --prefix crypto_interop run build
+      - name: Verify CIRCL and build native runtime signer
+        working-directory: crypto_interop/signer
+        run: |
+          go mod download
+          go mod verify
+          go test -count=1 ./...
+          go build -o "$RUNNER_TEMP/real-e2e-circl-signer" ./cmd/ra-credential-signer
+      - name: Complete database-free backend and crypto regression
+        run: |
+          export EVOTE_TEST_NODE="$(command -v node)"
+          "$EVOTE_TEST_PYTHON" -m pytest tests/ crypto_interop/ -q
+          node --test crypto_interop/dist/pending_state.test.js
+      - name: Frontend regression and browser engines
+        working-directory: frontend
+        run: |
+          npm run check
+          npm run build
+          npm test
+          npx --no-install playwright install --with-deps chromium
+          npm run test:browser
+          npm run test:voting-browser
+      - name: Real browser authentication issuance CIRCL voting and recovery
+        run: |
+          "$EVOTE_TEST_PYTHON" scripts/real_voting_e2e.py \
+            --allow-ephemeral-ci-databases \
+            --node "$(command -v node)" \
+            --signer-binary "$RUNNER_TEMP/real-e2e-circl-signer"
+      - name: Verify unchanged source and locks
+        run: |
+          git diff --exit-code
+          git diff --check
+      - name: Public synthetic screenshots only after successful cleanup
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        with:
+          name: real-voting-public-previews
+          path: ${{ runner.temp }}/real-voting-preview/*.png
+          if-no-files-found: error
+          retention-days: 3
