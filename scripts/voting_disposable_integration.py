@@ -124,6 +124,40 @@ def await_lock_wait(observer, blocker):
     raise AssertionError("Expected PostgreSQL election-lock contention did not occur")
 
 
+ACL_PROBES = (
+    ("direct_table_select",
+     "SELECT pg_catalog.has_table_privilege(current_user,'voting.accepted_ballots','SELECT')",
+     "SELECT * FROM voting.accepted_ballots", ()),
+    ("direct_table_delete",
+     "SELECT pg_catalog.has_table_privilege(current_user,'voting.accepted_ballots','DELETE')",
+     "DELETE FROM voting.accepted_ballots", ()),
+    ("internal_receipt_execute",
+     "SELECT pg_catalog.has_function_privilege(current_user,'voting._ballot_receipt(uuid,bytea,bytea,bytea,bytea)','EXECUTE')",
+     "SELECT voting._ballot_receipt(%s::uuid,%s::bytea,%s::bytea,%s::bytea,%s::bytea)",
+     (UUID("00000000-0000-4000-8000-000000000006"), bytes(32), b"{}", bytes(33), bytes(384))),
+)
+
+
+def run_acl_probes(runtime, diagnostics):
+    diagnostics.set_stage("acl_verification")
+    for probe_id, privilege_query, query, params in ACL_PROBES:
+        with diagnostics.probe(probe_id):
+            query_denial = None
+            try:
+                with runtime() as conn:
+                    check(conn.execute(privilege_query).fetchone() == (False,), "Forbidden SQL privilege is present")
+                    try:
+                        conn.execute(query, params)
+                    except psycopg.errors.InsufficientPrivilege as error:
+                        query_denial = error
+                        raise
+                    # Never commit a forbidden DELETE if permissions are wrong.
+                    raise AssertionError("Unauthorized SQL succeeded")
+            except psycopg.errors.InsufficientPrivilege as error:
+                if error is not query_denial or error.sqlstate != "42501":
+                    raise
+
+
 def run(fixture, runtime, database, marker, *, diagnostics=None):
     diagnostics = diagnostics if diagnostics is not None else IntegrationDiagnostics()
     diagnostics.set_stage("fixture_seed")
@@ -284,15 +318,7 @@ def run(fixture, runtime, database, marker, *, diagnostics=None):
                 (has_table_privilege('voting_ballot_login',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
                  OR has_any_column_privilege('voting_ballot_login',c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))""").fetchone() == (0,),
                   "Runtime has direct table access")
-        for query in ("SELECT * FROM voting.accepted_ballots", "DELETE FROM voting.accepted_ballots",
-                      "SELECT voting._ballot_receipt(NULL,NULL,NULL,NULL,NULL)"):
-            try:
-                with runtime() as conn:
-                    conn.execute(query)
-            except psycopg.errors.InsufficientPrivilege:
-                pass
-            else:
-                raise AssertionError("Unauthorized SQL succeeded")
+        run_acl_probes(runtime, diagnostics)
         # Even the trusted fixture cannot accidentally update the frozen policy.
         for query in ("UPDATE voting.election_configs SET config_bytes=config_bytes WHERE election_id=%s",
                       "UPDATE voting.elections SET closes_at=closes_at+interval '1 hour' WHERE election_id=%s"):

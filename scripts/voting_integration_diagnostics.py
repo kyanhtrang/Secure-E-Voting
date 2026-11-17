@@ -18,6 +18,7 @@ STAGES = frozenset({
 })
 CATEGORIES = frozenset({"assertion_error", "database_error", "voting_unavailable", "protocol_error",
                         "timeout_error", "concurrency_error", "system_exit", "unexpected_error"})
+ACL_PROBE_IDS = frozenset({"direct_table_select", "direct_table_delete", "internal_receipt_execute"})
 ASSERTIONS = {
     "A distinct voting_demo_test_ database is required": "database_designation",
     "Canonical marker required": "marker_format",
@@ -52,13 +53,14 @@ ASSERTIONS = {
     "PUBLIC function execution remains": "public_execute_denied",
     "Runtime has direct table access": "table_access_denied",
     "Unauthorized SQL succeeded": "unauthorized_sql_denied",
+    "Forbidden SQL privilege is present": "acl_metadata_denied",
     "Frozen policy mutation succeeded": "policy_update_denied",
     "Fixture cleanup failed": "fixture_removed",
     "Uncommitted migration head": "committed_migration_head",
     "Fixture database must be fresh": "initial_tables_empty",
     "Committed Voting fixture cleanup failed": "committed_cleanup",
 }
-ASSERTION_IDS = frozenset((*ASSERTIONS.values(), "none", "unclassified"))
+ASSERTION_IDS = frozenset((*ASSERTIONS.values(), *ACL_PROBE_IDS, "none", "unclassified"))
 
 
 class IntegrationDiagnostics:
@@ -82,7 +84,9 @@ class IntegrationDiagnostics:
                 return label
         return "unexpected_error"
 
-    def failure(self, error):
+    def failure(self, error, *, assertion_id=None):
+        if assertion_id is not None and assertion_id not in ACL_PROBE_IDS:
+            raise ValueError("Unknown ACL diagnostic identifier")
         root = getattr(error, "orig", None) or error
         state = getattr(root, "sqlstate", None)
         state = state if isinstance(state, str) and re.fullmatch(r"[0-9A-Z]{5}", state) else "unavailable"
@@ -90,14 +94,26 @@ class IntegrationDiagnostics:
         if isinstance(error, AssertionError):
             label = error.args[0] if error.args and type(error.args[0]) is str else None
             assertion = ASSERTIONS.get(label, "unclassified")
+        if assertion_id is not None:
+            assertion = assertion_id
         return ("stage="+self.stage+" category="+self.category(root)+" SQLSTATE="+state+
                 " assertion="+assertion)
 
-    def report(self, error):
+    def report(self, error, *, assertion_id=None):
         if id(error) not in self._reported:
             self._reported.add(id(error))
             self.failures += 1
-            print(self.failure(error), flush=True)
+            print(self.failure(error, assertion_id=assertion_id), flush=True)
+
+    @contextmanager
+    def probe(self, assertion_id):
+        if assertion_id not in ACL_PROBE_IDS:
+            raise ValueError("Unknown ACL diagnostic identifier")
+        try:
+            yield
+        except (Exception, SystemExit) as error:
+            self.report(error, assertion_id=assertion_id)
+            raise
 
     @contextmanager
     def at(self, stage):
