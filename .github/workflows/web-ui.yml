@@ -36,6 +36,8 @@ jobs:
           npm --prefix frontend ci --ignore-scripts
       - name: Compile and run component and API contract tests
         run: |
+	  test -x "$EVOTE_TEST_PYTHON"
+    	  "$EVOTE_TEST_PYTHON" -c "import rfc8785; from backend.crypto.credential_protocol import verify_credential"
           npm --prefix frontend run build
           npm --prefix frontend test
       - name: Install browser and test real HTTP auth with a synthetic in-memory database
