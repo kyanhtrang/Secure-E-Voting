@@ -44,13 +44,15 @@ BEGIN
        pg_catalog.has_schema_privilege(r.rolname,'public','CREATE') OR
        pg_catalog.pg_has_role(r.rolname,'voting_owner','MEMBER') OR EXISTS (
         SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='voting' AND c.relkind IN ('r','p','v','m','f') AND
-          (pg_catalog.has_table_privilege(r.rolname,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-           OR pg_catalog.has_any_column_privilege(r.rolname,c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))
+        WHERE n.nspname='voting' AND CASE WHEN c.relkind IN ('r','p','v','m','f')
+          THEN (pg_catalog.has_table_privilege(r.rolname,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                OR pg_catalog.has_any_column_privilege(r.rolname,c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))
+          ELSE FALSE END
        ) OR EXISTS (
         SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='voting' AND c.relkind='S' AND
-          pg_catalog.has_sequence_privilege(r.rolname,c.oid,'USAGE,SELECT,UPDATE')
+        WHERE n.nspname='voting' AND CASE WHEN c.relkind='S'
+          THEN pg_catalog.has_sequence_privilege(r.rolname,c.oid,'USAGE,SELECT,UPDATE')
+          ELSE FALSE END
        ) OR EXISTS (
         SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
         WHERE n.nspname='voting' AND pg_catalog.has_function_privilege(r.rolname,p.oid,'EXECUTE')
