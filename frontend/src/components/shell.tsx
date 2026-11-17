@@ -17,7 +17,7 @@ const links = {
   public: [{ to: '/public', text: 'Published elections', icon: Globe2 }, { to: '/public/board', text: 'Bulletin board', icon: ListChecks },
     { to: '/public/verify', text: 'Verify a receipt', icon: Fingerprint }],
 };
-export function Shell({ workspace }: { workspace: Workspace }) {
+export function Shell({ workspace, adminEnabled = false }: { workspace: Workspace; adminEnabled?: boolean }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const location = useLocation();
@@ -38,7 +38,7 @@ export function Shell({ workspace }: { workspace: Workspace }) {
         <span>Secure<span className="brand-second">E-Voting</span></span></NavLink>
       <div className="sidebar-label">WORKSPACE</div>
       <div className="workspace-name"><span className="workspace-symbol">{workspace === 'voter' ? <Users size={17} /> : workspace === 'admin' ? <LockKeyhole size={17} /> : <Globe2 size={17} />}</span>
-        <div>{info.title}<small>{workspace === 'admin' ? 'Foundation · read only' : workspace === 'public' ? 'No sign-in required' : 'Local research demo'}</small></div></div>
+        <div>{info.title}<small>{workspace === 'admin' ? (adminEnabled ? 'Authorized local operations' : 'Foundation \u00b7 read only') : workspace === 'public' ? 'No sign-in required' : 'Local research demo'}</small></div></div>
       <nav aria-label={info.title}>{links[workspace].map(({ to, text, icon: Icon }) =>
         <NavLink key={to} to={to} end={to === '/'+workspace} className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>
           <Icon size={18} aria-hidden="true" /><span>{text}</span><ChevronRight size={14} aria-hidden="true" /></NavLink>)}</nav>
