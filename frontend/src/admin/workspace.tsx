@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { useLocation } from 'react-router';
 import { Badge, Banner, Button, EmptyState, Loading, PageHeading, Panel } from '../components/ui';
 import { AdminFailure, createAdminClient, type AdminClient, type AuditEvent, type Election, type Keyset } from './client';
@@ -29,7 +29,9 @@ export function AdminWorkspace({ client: supplied }: { client?: AdminClient }) {
   const mounted = useRef(true);
   const location = useLocation();
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; client.forget(); }; }, [client]);
-  useEffect(() => { setConfirmation(null); }, [location.pathname, selected?.election_id]);
+  // Clear the previous context's confirmation during commit. A passive effect
+  // can otherwise erase a fresh confirmation requested after this selection.
+  useLayoutEffect(() => { setConfirmation(null); }, [location.pathname, selected?.election_id]);
   async function run(action: () => Promise<void>) {
     if (busy) return;
     setBusy(true); setError(''); setSuccess('');

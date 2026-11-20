@@ -38,7 +38,11 @@ def prompt(label):
 
 
 def connections(database, login, password):
-    if (database, login) not in {("voting_db", "voting_admin_login"), ("ra_db", "ra_election_publisher_login")}:
+    allowed_roles = {
+        "voting_db": "voting_admin_login",
+        "ra_db": "ra_election_publisher_login",
+    }
+    if database not in allowed_roles or login != allowed_roles[database]:
         raise ValueError("Restricted local identity required")
 
     def connect():

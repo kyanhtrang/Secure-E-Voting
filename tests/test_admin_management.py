@@ -210,6 +210,43 @@ def test_runtime_never_accepts_privileged_or_selected_target():
         with pytest.raises(ValueError): connections(database, role, "synthetic-unused")
 
 
+@pytest.mark.parametrize("database", ["voting_db", "ra_db", "unknown", "", None])
+@pytest.mark.parametrize("login", ["voting_admin_login", "ra_election_publisher_login", "postgres", "voting_owner", "ra_owner", "", None])
+def test_runtime_allowlist_accepts_only_exact_database_role_combinations(monkeypatch, database, login):
+    from backend.admin import launcher
+    connect = Mock(side_effect=AssertionError("No database access allowed"))
+    monkeypatch.setattr(launcher.psycopg, "connect", connect)
+    expected = {"voting_db": "voting_admin_login", "ra_db": "ra_election_publisher_login"}
+    if database in expected and login == expected[database]:
+        assert callable(connections(database, login, object()))
+    else:
+        with pytest.raises(ValueError, match="Restricted local identity required"):
+            connections(database, login, object())
+    connect.assert_not_called()
+
+
+@pytest.mark.parametrize("database", ["voting_db", "ra_db"])
+def test_runtime_allowlist_retains_connection_checks_and_separate_password(monkeypatch, database):
+    from backend.admin import launcher
+    login = "voting_admin_login" if database == "voting_db" else "ra_election_publisher_login"
+    owner = "voting_owner" if database == "voting_db" else "ra_owner"
+    conn = Mock()
+    conn.execute.return_value.fetchone.side_effect = [
+        (database, login, login), (owner,), (True,), (False,), (False,), (False,), (False,)]
+    connect = Mock(return_value=conn)
+    monkeypatch.setattr(launcher.psycopg, "connect", connect)
+    supplied_password = object()  # Opaque sentinel, never a credential literal.
+    assert connections(database, login, supplied_password)() is conn
+    assert connect.call_args.kwargs["password"] is supplied_password
+    assert connect.call_args.kwargs["dbname"] == database
+    assert connect.call_args.kwargs["user"] == login
+    assert connect.call_args.kwargs["host"] == "127.0.0.1"
+    assert connect.call_args.kwargs["port"] == 5432
+    assert conn.execute.call_count == 7
+    conn.commit.assert_called_once()
+    conn.close.assert_not_called()
+
+
 def test_verifier_requires_explicit_local_configuration(tmp_path):
     import json
     file = tmp_path / "synthetic.json"

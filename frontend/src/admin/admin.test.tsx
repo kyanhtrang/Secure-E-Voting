@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { Link, MemoryRouter } from 'react-router';
+import { Profiler } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { AdminFailure, createAdminClient, type AdminClient, type Election } from './client';
 import { AdminWorkspace } from './workspace';
@@ -52,5 +53,58 @@ describe('independent administrator boundary', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm open' }));
     await waitFor(() => expect(client.change).toHaveBeenCalledWith(election.election_id, '/open', 'POST', {}));
     expect(await screen.findByRole('heading', { name: 'Administrator sign-in' })).toBeInTheDocument();
+  });
+  it('preserves confirmation requested at the selection commit before passive effects', async () => {
+    const election = { election_id: '11111111-1111-4111-8111-111111111111', title: 'Synthetic commit-boundary election', status: 'DRAFT', phase: 'FROZEN', revision: 2,
+      opens_at: '2026-01-01T00:00:00Z', closes_at: '2027-01-01T00:00:00Z', candidates: [], ra_ready: false, keyset_id: 'synthetic-keyset', config_hash: 'a'.repeat(64), bundle: {} } satisfies Election;
+    const client = { login: vi.fn(), forget: vi.fn(), logout: vi.fn(), list: vi.fn().mockResolvedValue({ elections: [election] }),
+      keys: vi.fn().mockResolvedValue({ keysets: [] }), detail: vi.fn().mockResolvedValue(election), audit: vi.fn().mockResolvedValue({ events: [] }), change: vi.fn().mockRejectedValue(new AdminFailure(401)) } as unknown as AdminClient;
+    let requested = false;
+    render(<Profiler id="selection-commit" onRender={() => {
+      // Profiler runs during commit, before passive effects. Exercise the exact
+      // ordering without sleeps, timeouts, or mocking the production component.
+      const button = screen.queryByRole<HTMLButtonElement>('button', { name: 'Open / reconcile opening' });
+      if (button && !button.disabled && !requested) { requested = true; button.click(); }
+    }}><MemoryRouter><AdminWorkspace client={client} /></MemoryRouter></Profiler>);
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in as administrator' }).closest('form')!);
+    fireEvent.click(await screen.findByRole('button', { name: 'Synthetic commit-boundary election · DRAFT' }));
+    await waitFor(() => expect(requested).toBe(true));
+    expect(await screen.findByRole('button', { name: 'Confirm open' })).toBeEnabled();
+    expect(client.change).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm open' }));
+    await waitFor(() => expect(client.change).toHaveBeenCalledWith(election.election_id, '/open', 'POST', {}));
+    expect(await screen.findByRole('heading', { name: 'Administrator sign-in' })).toBeInTheDocument();
+  });
+  it('clears stale confirmation when switching elections or routes, including returning to the previous context', async () => {
+    const first = { election_id: '11111111-1111-4111-8111-111111111111', title: 'Synthetic first election', status: 'DRAFT', phase: 'FROZEN', revision: 2,
+      opens_at: '2026-01-01T00:00:00Z', closes_at: '2027-01-01T00:00:00Z', candidates: [], ra_ready: false, keyset_id: 'synthetic-keyset', config_hash: 'a'.repeat(64), bundle: {} } satisfies Election;
+    const second = { ...first, election_id: '22222222-2222-4222-8222-222222222222', title: 'Synthetic second election' };
+    const client = { login: vi.fn(), forget: vi.fn(), logout: vi.fn(), list: vi.fn().mockResolvedValue({ elections: [first, second] }),
+      keys: vi.fn().mockResolvedValue({ keysets: [] }), detail: vi.fn().mockImplementation(async (id: string) => ({ ...(id === first.election_id ? first : second) })),
+      audit: vi.fn().mockResolvedValue({ events: [] }), change: vi.fn() } as unknown as AdminClient;
+    render(<MemoryRouter initialEntries={['/admin']}><Link to="/admin/status">Change admin route</Link><Link to="/admin">Return to overview</Link><AdminWorkspace client={client} /></MemoryRouter>);
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in as administrator' }).closest('form')!);
+    async function select(election: Election) {
+      fireEvent.click(await screen.findByRole('button', { name: election.title + ' · DRAFT' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Open / reconcile opening' })).toBeEnabled());
+      expect(screen.getByRole('heading', { name: election.title })).toBeInTheDocument();
+    }
+    await select(first);
+    fireEvent.click(screen.getByRole('button', { name: 'Open / reconcile opening' }));
+    expect(screen.getByRole('button', { name: 'Confirm open' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh status' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh status' })).toBeEnabled());
+    expect(screen.getByRole('button', { name: 'Confirm open' })).toBeInTheDocument();
+    await select(second);
+    expect(screen.queryByRole('button', { name: 'Confirm open' })).not.toBeInTheDocument();
+    await select(first);
+    expect(screen.queryByRole('button', { name: 'Confirm open' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open / reconcile opening' }));
+    expect(screen.getByRole('button', { name: 'Confirm open' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: 'Change admin route' }));
+    expect(screen.queryByRole('button', { name: 'Confirm open' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: 'Return to overview' }));
+    expect(screen.queryByRole('button', { name: 'Confirm open' })).not.toBeInTheDocument();
+    expect(client.change).not.toHaveBeenCalled();
   });
 });
