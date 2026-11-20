@@ -343,7 +343,7 @@ def close_election(db, election):
             (election,)).fetchone() is not None, "Fixture close failed")
 
 
-def browser(node, configuration, db, voter, election, stage):
+def browser(node, configuration, db, voter, election, stage, *, close=None, checkpoint=None):
     with child([str(node),str(ROOT/"frontend/tests/real-voting.mjs"),"--real-services-only"],cwd=ROOT/"frontend") as process:
         process.stdin.write(json.dumps(configuration)+"\n"); process.stdin.flush()
         lines = queue.Queue(maxsize=32)
@@ -387,10 +387,13 @@ def browser(node, configuration, db, voter, election, stage):
             seen.append(event)
             receipt = message.get("receipt_hash")
             check(receipt is None or (isinstance(receipt,str) and re.fullmatch(r"[0-9a-f]{64}",receipt)), "Invalid private checkpoint receipt")
-            if event in {"before_submit_close", "close_after_accept"}: close_election(db,election)
+            if event in {"before_submit_close", "close_after_accept"}:
+                if close is None: close_election(db,election)
+                else: close(event)
             issued = int(event not in {"catalogue", "prepared"})
             ballots = int(event in {"committed_response_lost","accepted","recovered","security_checks","close_after_accept","closed_recovery"})
             assert_database(db,voter,election,issued=issued,ballots=ballots,receipt=receipt)
+            if checkpoint is not None: checkpoint(event)
             process.stdin.write('{"ok":true}\n'); process.stdin.flush()
             print("PASS: real_voting_e2e checkpoint="+event)
         check(process.wait(timeout=10) == 0, "Real browser process failed")
