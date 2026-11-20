@@ -5,6 +5,7 @@ import { SessionProvider } from './auth/session';
 import { Shell } from './components/shell';
 import { PageHeading, TextLink } from './components/ui';
 import { config, type AppConfig } from './config';
+import { AdminWorkspace } from './admin/workspace';
 import { AdminOverview, AdminSection } from './pages/admin';
 import { AnonymousVoting, BulletinBoard, PublicOverview, PublicResults, VerifyReceipt } from './pages/public';
 import { Credentials, ElectionDetail, Elections, Login, RequireSession, VoterOverview } from './pages/voter';
@@ -23,8 +24,8 @@ export function App({ settings = config, client }: { settings?: AppConfig; clien
         <Route path="credentials" element={settings.votingEnabled ? <VotingCredentials /> : <Credentials />} />
       </Route>
     </Route>
-    <Route path="/admin" element={<Shell workspace="admin" />}>
-      <Route index element={<AdminOverview />} /><Route path=":section" element={<AdminSection />} />
+    <Route path="/admin" element={<Shell workspace="admin" adminEnabled={settings.adminEnabled ?? false} />}>
+      <Route index element={settings.adminEnabled ? <AdminWorkspace /> : <AdminOverview />} /><Route path=":section" element={settings.adminEnabled ? <AdminWorkspace /> : <AdminSection />} />
     </Route>
     <Route path="/public" element={<Shell workspace="public" />}>
       <Route index element={<PublicOverview />} /><Route path="results/:electionId" element={<PublicResults />} />
