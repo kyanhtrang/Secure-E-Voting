@@ -75,7 +75,7 @@ def test_hosted_ra_composition_preserves_real_routers_sessions_and_both_fixture_
     password,env=gate.real.synthetic_environment(gate.SecretStr("synthetic-only"))
     env["RA_DEMO_SUBJECT"]=subject
     connect=Mock()
-    app=gate.ra_app(dict(auth_config=env,election_id=str(uuid4())),connect,Mock(),bytes(32))
+    app=gate.ra_app(dict(auth_config=env,election_id=str(uuid4()),voter_id=str(uuid4())),connect,Mock(),bytes(32))
     auth=app.dependency_overrides[get_ra_auth_service]()
     identity=auth._service.verifier.verify_credentials(env["RA_DEMO_USERNAME"],password)
     assert identity.provider == "demo-local" and identity.subject == subject

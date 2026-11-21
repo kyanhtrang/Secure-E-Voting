@@ -1,9 +1,10 @@
 # Real Admin to Voter to Tally integration review
 
 Branch `test/voting-tally-integration`, base `main` at `f53bc10`.
-The combined real-service gate is implemented for human review. **It has not run
-on GitHub Actions.** Prior component gates and the local results below do not
-establish a combined E2E PASS.
+Run 1 passed migrations, Admin finalization, OPEN-state Tally denial and the first
+Chromium ballot, then failed the second voter's login with HTTP 401. This targeted
+correction is based on `9c0f9d1`. **The corrected combined gate has not run or
+passed on Actions.** Local regression results do not establish an E2E PASS.
 
 ## Architecture and key ownership
 
@@ -37,7 +38,8 @@ migrations remain unchanged. The production RA demo composition intentionally
 accepts one fixed subject. A hosted-only adapter composes the same real routers,
 authentication/session stores, limiter, local-origin and no-store middleware,
 catalogue and issuance services for exactly the two trusted synthetic subjects.
-It uses restricted, guarded connection factories. It provides no mocked HTTP,
+It uses disposable-only authentication RPCs and restricted, guarded connection
+factories. It provides no mocked HTTP,
 database result or signature. Each voter has its own RA process and Vite origin;
 both use the same election and credential signing key. Their browser contexts
 remain alive until tally completion, retaining their own recovery proofs.
@@ -82,6 +84,75 @@ generated keys and eligibility via `ra.set_voter_eligibility`. Drafts, candidate
 signed configuration, RA publication, lifecycle changes and accepted ballots are
 created through actual services. No accepted ballots are seeded in the combined
 journey. Immutable rows are retained until their owned containers are destroyed.
+
+## Run 1 authentication correction
+
+The real failure path was password verification, `RAAuthenticationService.login`,
+`PostgreSQLDemoVoterAccountReader.find_active_voter_id`, then
+`ra_demo.find_active_demo_voter_id`. Applied revision `f3c2a1d4e6b8` returns NULL
+for any subject other than `demo-voter-001`. The service converts that into
+`AuthenticationDenied` and the router returns generic HTTP 401. Changing only the
+username/verifier cannot fix it: `a9c31d5e8b72` restricts session issuance, and
+`f3c2a1d4e6b8` also restricts active lookup and revocation to the first voter.
+Both applied revisions and production launchers/composition remain unchanged.
+
+[The fixture-only adapter](../scripts/voting_tally_auth.py) installs `ra_e2e_auth`
+in one transaction after migrations and synthetic identity setup. Before DDL it
+verifies hosted activation, the owned RA container, actual database name, independent
+marker, database owner, migrator/session/current roles, PostgreSQL 18, expected RA
+migration head, schema absence and both exact active UUID/provider/subject tuples.
+Mismatches refuse installation. Functions and schema are owned by `ra_owner`;
+no runtime receives owner/migrator credentials.
+
+The private `ra_e2e_auth.voters` table contains only the two generated UUIDs, fixed
+provider `demo-local` and subjects `demo-voter-001`/`demo-voter-002`. UUID/FK, unique
+subject and CHECK constraints bound it to two slots. Runtime cannot read or modify
+this table. This is fixture DDL, not an Alembic revision or production installer.
+
+| Test-only RPC | Return and authorization |
+|---|---|
+| `find_voter(uuid,text,text)` | UUID or NULL; exact pinned UUID/provider/subject, current active voter, caller `session_user=ra_auth_login` |
+| `issue_session(uuid,text)` | Boolean; allowlisted active voter locked FOR SHARE, canonical hex digest; reuse `ra.create_session` with DB clock and exactly 15-minute TTL |
+| `find_session(uuid,text)` | voter_id UUID and created_at/expires_at/revoked_at timestamptz; reuse active/nonrevoked/unexpired `ra.find_active_session`, constrained to the expected UUID and allowlist/current identity |
+| `revoke_session(uuid,text)` | Boolean; atomic UPDATE matching digest, expected UUID and current allowlisted identity; database-controlled revocation time, no client timestamp accepted |
+
+All four RPCs are SECURITY DEFINER with fixed
+`pg_catalog,ra_e2e_auth,ra,pg_temp` search paths and qualified objects. Only
+`ra_auth_login` gets schema USAGE and these EXECUTE grants, without grant option.
+PUBLIC is revoked; unexpected function/schema/table default grants abort the
+installation. There are no general RA RPC/table grants, new roles or production
+function replacements. Fixture objects disappear with the owned container.
+
+Private RA process configuration now carries its trusted generated voter UUID;
+the HTTP client cannot override it. Every account/session RPC binds this UUID.
+Tokens retain canonical 32-byte base64url encoding and exactly SHA256(token ASCII)
+with no fallback, and are returned only after commit. The new bound session check
+also precedes real credential issuance: the original issuance router does not
+consult the login router's session dependency itself. Original blinded bytes,
+reservations, native CIRCL signing and encrypted recovery are unchanged. Logout
+checks the bound active session before atomic revocation. The existing catalogue
+already checks the session dependency before policy reads.
+
+The shared restricted auth login remains a trusted capability able to mint
+sessions for either of these two CI identities. The database does not verify human
+passwords or identify which Python process uses that login. Server-side UUID
+binding protects HTTP token substitution; it does not isolate a compromised RA
+process/coordinator. This fixture is not production multi-user authentication.
+
+Real CI assertions require both Me identities, distinct IDs/tokens, exact persisted
+ASCII digests/15-minute lifetimes, cross-voter Me/catalogue/Logout/issuance rejection,
+and failed cross-voter SQL lookup/revocation without invalidating rightful sessions.
+Separate auxiliary sessions exercise logout and expiry; expiry fixture writes match
+only the auxiliary digest and voter UUID. A third active synthetic voter is seeded
+solely for negative checks: all four new RPCs must reject it, no session may persist,
+and the allowlist must remain two rows. The original demo RPCs must still refuse
+voter B, including SQLSTATE 42501 on its issuer. Existing assertions still require
+one completed credential per eligible voter/election and two real browser ballots.
+
+Final ACL checks inspect effective grants and require actual 42501 denials for all
+four RPCs from issuance/publisher roles using harmless non-NULL probes. PUBLIC and
+every unrelated function grantee are also excluded by ACL inspection. The existing
+workflow and real browser driver are unchanged.
 
 ## HTTP scenarios and committed assertions
 
@@ -171,7 +242,9 @@ PASS: voting_tally_e2e checkpoint=migrations
 PASS: admin_voter_e2e checkpoint=admin_draft scenario=accepted
 PASS: admin_voter_e2e checkpoint=admin_finalize scenario=accepted
 PASS: voting_tally_e2e checkpoint=open_tally_denied
+PASS: voting_tally_e2e checkpoint=voter_a_authenticated
 PASS: voting_tally_e2e checkpoint=accepted_first
+PASS: voting_tally_e2e checkpoint=voter_b_authenticated
 PASS: voting_tally_e2e checkpoint=accepted_second
 PASS: voting_tally_e2e checkpoint=close_interrupted
 PASS: voting_tally_e2e checkpoint=close_reconciled
@@ -196,7 +269,7 @@ Executed on this combined checkout, not added counts from older branches:
 
 | Check | Actual result |
 |---|---|
-| Complete backend/crypto `pytest tests/ crypto_interop/ -q` | 839 passed (805 existing + 34 new coordinator tests) |
+| Complete backend/crypto `pytest tests/ crypto_interop/ -q` | 872 passed (839 before this correction + 33 new authentication safety tests) |
 | Frontend Vitest | 87 passed, 8 files |
 | Existing authentication browser suite | 7 passed |
 | Existing voting browser suite | 7 passed |
@@ -207,35 +280,41 @@ Executed on this combined checkout, not added counts from older branches:
 | Crypto TypeScript build; new driver Node syntax | PASS |
 | Python dependency integrity/version verification; locked npm installs/tree | PASS; locks unchanged |
 | Python/JSON/YAML parsing, workflow Bash syntax | PASS |
+| Offline SQL syntax | PASS: standalone pglast v8.9 parsed DDL, all four RPC bodies and 32 static/parameterized queries; no server connected |
 | Changed-source secret/payload and whitespace review; `git diff --check` | PASS |
-| New combined real PostgreSQL/CIRCL/Chromium journey | NOT RUN; pending Ubuntu Actions |
+| Corrected combined real PostgreSQL/CIRCL/Chromium journey | NOT RUN; pending Ubuntu Actions; Run 1 stopped at second login |
 | Native Go build/test locally | NOT RUN; Go is not available on the local PATH; required in Actions |
 
 Local browsers used installed Edge via the existing Windows Playwright settings;
 Actions installs pinned Playwright Chromium. Local Python used the project venv,
 `PSYCOPG_IMPL=python` and installed libpq18 for database-free imports because
 Windows Application Control blocks the bundled psycopg DLL. This opens no database
-connection and changes no security policy. The initial frontend attempt used
-system Python and failed a missing dependency/import; the corrected full run
-above used the project venv. The unchanged Vite build emits its existing blindrsa
+connection and changes no security policy. All current runs used the project
+venv. The unchanged Vite build emits its existing blindrsa
 Node `crypto` externalization notice; browser crypto regressions passed.
 
-All changed files are new:
+Files changed for this correction:
 
-- [Dedicated workflow](../.github/workflows/voting-tally-integration.yml).
-- [Hosted coordinator and isolated adapters](../scripts/voting_tally_e2e.py).
-- [Real browser driver](../frontend/tests/real-voting-tally.mjs).
-- [Database-free safety regressions](../tests/test_voting_tally_e2e_safety.py).
-- [This review report](./27-voting-tally-integration.md).
+- [Hosted coordinator](../scripts/voting_tally_e2e.py): install fixture, bind voter UUIDs, validate real sessions and add fixed authentication checkpoints.
+- [Disposable authentication adapter](../scripts/voting_tally_auth.py): new fixture DDL, restricted RPC clients and real CI authentication/ACL assertions.
+- [Authentication safety tests](../tests/test_voting_tally_auth.py): 33 new database-free regressions, explicitly distinguished from PostgreSQL execution.
+- [Existing gate safety tests](../tests/test_voting_tally_e2e_safety.py): supply the newly required trusted UUID in the composition fixture; assertions retained.
+- [This review report](./27-voting-tally-integration.md): failure mechanism, SQL privileges, current validation and pending CI.
 
 No application source, dependency lock, existing workflow, applied migration,
 production launcher, stash or previous test assertion is changed.
 
+Offline SQL parsing used [pglast](https://pglast.readthedocs.io/en/latest/) v8.9
+installed only into an OS-temporary validation directory, outside the checkout.
+No parser package was added to project requirements or locks. Parsing verifies
+syntax, not live object resolution, runtime privileges or transaction behavior.
+
 ## Limitations and human approval gate
 
-The new wiring, actual migration execution, browser ciphertext decryption, exact
-committed counts, real ACL denials and owned-resource cleanup remain unverified
-until this workflow runs successfully on Ubuntu. Database-free unit doubles are
+The correction's fixture installation, two-voter PostgreSQL sessions, second browser
+ballot, ciphertext decryption, exact committed counts, ACL denials and complete
+cleanup remain unverified until the corrected workflow runs on Ubuntu. Run 1's
+migration and first-ballot evidence is retained. Database-free unit doubles are
 used only to test guard refusal, private control, error handling and coordination;
 they are not E2E substitutes.
 

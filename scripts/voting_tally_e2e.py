@@ -33,12 +33,12 @@ from backend.tally.http import create_tally_app
 from backend.tally.launcher import EncryptedTallyKey
 from backend.tally.runtime import TallyAuthentication, TallyService, TallyStore
 from backend.tally.verification import EvidenceVault
-from scripts import admin_voter_e2e as guard, tally_postgres_ci as tally_ci
+from scripts import admin_voter_e2e as guard, tally_postgres_ci as tally_ci, voting_tally_auth as e2e_auth
 
 real, check = guard.real, guard.check
-STAGES = {"preflight", "provision", "migrations", "keys", "admin_draft", "admin_finalize",
+STAGES = {"preflight", "provision", "migrations", "auth_fixture", "keys", "admin_draft", "admin_finalize",
           "services", "open_interrupted", "open_reconciled", "open_tally_denied", "browser",
-          "accepted_first", "accepted_second", "close_interrupted", "close_reconciled",
+          "voter_a_authenticated", "voter_b_authenticated", "accepted_first", "accepted_second", "close_interrupted", "close_reconciled",
           "tally", "evidence", "idempotency", "configuration_rejected", "receipts", "acl", "cleanup"}
 TALLY_FIELDS = {"target", "password", "operator", "username", "salt", "digest", "pin",
                 "snapshot_pin", "snapshot_key", "snapshot_unlock", "tally_key", "tally_unlock",
@@ -120,28 +120,32 @@ def ra_app(config, auth_connect, service, pin):
     from backend.ra.credential_router import router as credential_router, get_credential_service
     from backend.ra.demo_auth_config import load_demo_credential_verifier
     from backend.ra.demo_launcher import LocalDemoMiddleware
-    from backend.ra.demo_session_service import DemoSessionService
     from backend.ra.election_catalogue import router as catalogue_router, get_election_catalogue
     from backend.ra.login_rate_limit import LimitedDemoAuthentication
     from backend.ra.login_router import router as login_router, get_ra_auth_service
-    from backend.ra.postgres_demo_auth import PostgreSQLDemoSessionStore, PostgreSQLDemoVoterAccountReader
-    from backend.ra.postgres_demo_session_issuer import PostgreSQLDemoSessionIssuer
     from backend.ra.session_router import router as session_router, get_ra_session_service
     require_ci()
     env = config["auth_config"]
     check(env.get("RA_DEMO_PROVIDER") == "demo-local" and env.get("RA_DEMO_SUBJECT") in
           {"demo-voter-001", "demo-voter-002"}, "Trusted synthetic identity required")
     verifier = load_demo_credential_verifier(env)
-    auth = LimitedDemoAuthentication(RAAuthenticationService(verifier,
-        PostgreSQLDemoVoterAccountReader(auth_connect), PostgreSQLDemoSessionIssuer(auth_connect)))
-    sessions = DemoSessionService(PostgreSQLDemoSessionStore(auth_connect))
+    store = e2e_auth.SessionStore(auth_connect, UUID(config["voter_id"]), env["RA_DEMO_SUBJECT"])
+    auth = LimitedDemoAuthentication(RAAuthenticationService(verifier, store, store))
+    sessions = e2e_auth.BoundSessions(store)
+    issuance = e2e_auth.BoundIssuance(service, sessions)
     catalogue = real.ElectionCatalogue(service.store, pin, [config["election_id"]])
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     for router in (login_router, session_router, credential_router, catalogue_router): app.include_router(router)
     app.dependency_overrides.update({get_ra_auth_service: lambda: auth, get_ra_session_service: lambda: sessions,
-        get_credential_service: lambda: service, get_election_catalogue: lambda: catalogue})
+        get_credential_service: lambda: issuance, get_election_catalogue: lambda: catalogue})
     for middleware in (LocalDemoMiddleware, AuthNoStoreMiddleware, CredentialNoStore): app.add_middleware(middleware)
     return app
+
+
+def ra_configuration(config):
+    check(type(config) is dict and set(config) == guard.ROLE_FIELDS["ra"] | {"voter_id"}, "Bound RA fixture required")
+    check(str(UUID(config["voter_id"])) == config["voter_id"], "Canonical trusted voter required")
+    return guard.configuration("ra", {k:v for k,v in config.items() if k != "voter_id"})
 
 
 def serve_ra():
@@ -149,7 +153,7 @@ def serve_ra():
     line = sys.stdin.readline(16385)
     check(0 < len(line) <= 16384, "Bounded private configuration required")
     config = strict_json(line.encode())
-    owned, = guard.configuration("ra", config)
+    owned, = ra_configuration(config)
     pin = b64decode(config["pin"], 32)
     auth = guard.connection(owned, "ra_auth_login", SecretStr(config["auth_password"]))
     issue = guard.connection(owned, "ra_issuance_login", SecretStr(config["issuance_password"]))
@@ -198,7 +202,7 @@ def browser_event(process, timeout=90):
 def isolated_process(role, config):
     check(role in {"tally", "ra"}, "Restricted process role required")
     if role == "tally": tally_configuration(config)
-    else: guard.configuration("ra", config)
+    else: ra_configuration(config)
     with real.child([sys.executable, str(Path(__file__).resolve()),
         "--allow-ephemeral-ci-databases", "--serve-" + role]) as process:
         send(process, config)
@@ -330,6 +334,8 @@ def run(node, signer, stage):
             conn.execute("INSERT INTO ra.voters(voter_id,auth_provider,auth_subject,is_active) VALUES(%s,'demo-local','demo-voter-002',true)", (second,))
         with db.voting_fixture() as conn:
             conn.execute("INSERT INTO voting_tally.principals(operator_id,role,is_active) VALUES(%s,'TALLY_OPERATOR',true)", (operator,))
+        stage[0] = "auth_fixture"
+        e2e_auth.install(ra,db.ra_fixture,dict(zip(e2e_auth.SUBJECTS,(first,second))))
         directory = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix="evote-voting-tally-", dir=root)))
         stage[0] = "keys"
         pin, snapshot_pin, catalogue, files = keys(directory)
@@ -370,7 +376,7 @@ def run(node, signer, stage):
         tally_http(tally_origin,path+"/run",409,token=tally_token,body={},error_code="CONFLICT")
         checkpoint("open_tally_denied")
         vote_origin = resources.enter_context(guard.service_process("voting", dict(target=voting.wire(),pin=b64encode(pin),password=passwords["voting_ballot_login"].get_secret_value())))
-        receipts = []
+        receipts, voter_services = [], []
         with ExitStack() as browsers:
             for index, voter in enumerate((first,second)):
                 stage[0] = "browser"
@@ -379,11 +385,18 @@ def run(node, signer, stage):
                 ra_origin = resources.enter_context(ra_process(dict(target=ra.wire(),pin=b64encode(pin),auth_config=env,
                     auth_password=passwords["ra_auth_login"].get_secret_value(),issuance_password=passwords["ra_issuance_login"].get_secret_value(),
                     encrypted_key=str(files["ra"][0]),unlock=files["ra"][1].get_secret_value(),signer=str(signer),
-                    key_id=manifest["ra_key"]["key_id"],election_id=str(election))))
+                    key_id=manifest["ra_key"]["key_id"],election_id=str(election),voter_id=str(voter))))
+                stage[0] = "voter_a_authenticated" if index == 0 else "voter_b_authenticated"
                 voter_token = guard.http(ra_origin,"/api/v1/ra/auth/login",200,method="POST",data={"username":env["RA_DEMO_USERNAME"],"password":password})["access_token"]
+                check(guard.http(ra_origin,"/api/v1/ra/auth/me",200,token=voter_token) == {"voter_id":str(voter)},"Authenticated voter mismatch")
+                checkpoint(stage[0])
+                voter_services.append((ra_origin,voter_token,voter,env["RA_DEMO_USERNAME"],password))
+                e2e_auth.check_session(db.ra_fixture,voter,voter_token)
+                if index == 1: e2e_auth.check_authentication(voter_services,db.ra_fixture,db.ra_auth,election)
                 tally_http(tally_origin,"auth/me",401,token=voter_token)
                 guard.http(origin,"/api/v1/admin/elections",401,token=voter_token)
                 front = resources.enter_context(real.frontend(node,ra_origin,vote_origin,pin))
+                stage[0] = "browser"
                 receipt = browsers.enter_context(browser(node,dict(origin=front,username=env["RA_DEMO_USERNAME"],password=password,
                     passphrase=secrets.token_urlsafe(48),election_id=str(election),candidate="AB"[index])))
                 check(receipt not in receipts,"Duplicate committed receipt")
@@ -428,6 +441,7 @@ def run(node, signer, stage):
         checkpoint("receipts")
         stage[0] = "acl"
         guard.admin_acl(db,connect(voting,"voting_admin_login"),connect(ra,"ra_election_publisher_login"))
+        e2e_auth.check_acl(db.ra_auth,(db.ra_issue,connect(ra,"ra_election_publisher_login")),db.ra_fixture)
         tally_ci.check_acl(tally_ci.runtime(voting,passwords["voting_tally_login"]),db.voting_runtime,db.voting_fixture)
         with connect(voting,"voting_admin_login")() as conn:
             check(conn.execute("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='voting_tally' AND has_function_privilege(current_user,p.oid,'EXECUTE')").fetchone() == (0,),"Admin can execute Tally functions")
