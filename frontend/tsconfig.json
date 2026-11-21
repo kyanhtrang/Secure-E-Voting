@@ -20,5 +20,5 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
-  "include": ["src", "*.config.ts", "tests/browser", "tests/voting-browser", "tests/admin-browser", "tests/tally-browser"]
+  "include": ["src", "*.config.ts", "tests/browser", "tests/voting-browser", "tests/admin-browser", "tests/tally-browser", "tests/board-browser"]
 }
