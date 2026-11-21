@@ -42,6 +42,9 @@ STAGES = journey.STAGES | {"publication_migration", "publisher_authorization", "
 COMMON = {"target", "password", "trust"}
 FIELDS = {"board": COMMON, "publisher": COMMON | {"key", "unlock", "evidence"}}
 TRUST_FIELDS = {"authority", "evidence", "evidence_key_id", "publication", "publication_key_id"}
+ACL_CHECKS = {"board_acl_role_attributes", "board_acl_schema_create", "board_acl_function_execute",
+    "board_acl_direct_sql", "board_acl_public_grants", "board_acl_function_metadata", "board_acl_audit_actor"}
+ACL_SQLSTATES = {"42501", "25006", "42704", "42883", "3F000", "42P01", "40001", "40P01", "55P03", "57014"}
 
 
 def require_ci():
@@ -58,7 +61,40 @@ def checkpoint(stage, state):
 
 def failure(stage, error):
     label = stage if stage in STAGES else "preflight"
+    identifier = getattr(error, "board_acl_check", None)
+    if label == "board_acl" and isinstance(identifier, str) and identifier in ACL_CHECKS:
+        root = getattr(error, "orig", None) or error
+        category = "database_error" if isinstance(root, psycopg.Error) else "assertion_error"
+        state = getattr(root, "sqlstate", None)
+        state = state if isinstance(state, str) and state in ACL_SQLSTATES else "unavailable"
+        return f"FAIL: full_election_e2e stage=board_acl check={identifier} category={category} sqlstate={state}"
     return guard.failure("preflight", error).replace("admin_voter_e2e stage=preflight", "full_election_e2e stage=" + label)
+
+
+@contextmanager
+def acl_check(identifier):
+    check(isinstance(identifier, str) and identifier in ACL_CHECKS, "Unknown ACL check")
+    try: yield
+    except Exception as error:
+        existing = getattr(error, "board_acl_check", None)
+        if not isinstance(existing, str) or existing not in ACL_CHECKS:
+            error.board_acl_check = identifier
+        raise  # Preserve the exception, SQL and transaction behavior; annotate only.
+
+
+def runtime_role(conn, login):
+    """Validate the exact reviewed login policy, including PG18 membership options."""
+    ballot = login == "voting_ballot_login"
+    check(conn.execute("SELECT current_user,rolcanlogin,NOT(rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls),rolinherit FROM pg_roles WHERE rolname=current_user").fetchone()
+        == (login,True,True,ballot), "Unsafe runtime role")
+    rows = conn.execute("SELECT parent.rolname,child.rolname,m.admin_option,m.inherit_option,m.set_option FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid JOIN pg_roles child ON child.oid=m.member WHERE m.member=(SELECT oid FROM pg_roles WHERE rolname=current_user) OR m.roleid=(SELECT oid FROM pg_roles WHERE rolname=current_user)").fetchall()
+    expected = [("voting_ballot_service","voting_ballot_login",False,True,False)] if ballot else []
+    check(rows == expected, "Unexpected runtime role membership")
+    if ballot:
+        # The inherited capability role must itself have no parents, elevated
+        # attributes, login, or members other than this one reviewed login.
+        check(conn.execute("SELECT NOT(rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls),NOT EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid OR (roleid=r.oid AND member<>(SELECT oid FROM pg_roles WHERE rolname=current_user))) FROM pg_roles r WHERE rolname='voting_ballot_service'").fetchone()
+            == (True,True), "Unsafe inherited capability role")
 
 
 def trust_value(value):
@@ -331,28 +367,34 @@ class Publication:
 
     def acl(self):
         self.stage[0] = "board_acl"
-        for factory, expected in ((self.reader,{"read_public","catalogue"}), (self.publisher,{"publication_input","finish"}),
-            (self.admin,set()),(self.tally,set()),(self.db.voting_runtime,set())):
-            with factory() as conn:
-                check(conn.execute("SELECT NOT(rolsuper OR rolinherit OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls),NOT EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid OR roleid=r.oid) FROM pg_roles r WHERE rolname=current_user").fetchone() == (True,True),"Unsafe runtime role")
-                check(conn.execute("SELECT count(*) FROM pg_namespace n WHERE n.nspname IN ('public','voting','voting_admin','voting_tally','voting_board') AND has_schema_privilege(current_user,n.oid,'CREATE')").fetchone() == (0,),"Runtime schema CREATE allowed")
-                rows = conn.execute("SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='voting_board' AND has_function_privilege(current_user,p.oid,'EXECUTE')").fetchall()
-                check({r[0] for r in rows} == expected,"Unexpected Board execution surface")
-            for query in ("SELECT * FROM voting.accepted_ballots","DELETE FROM voting.publications","SELECT * FROM voting_board.evidence","SET ROLE voting_owner"):
-                real.deny(factory,query)
-        with self.db.voting_fixture() as conn:
+        for factory, login, expected in ((self.reader,"voting_board_login",{"read_public","catalogue"}),
+            (self.publisher,"voting_publication_login",{"publication_input","finish"}), (self.admin,"voting_admin_login",set()),
+            (self.tally,"voting_tally_login",set()),(self.db.voting_runtime,"voting_ballot_login",set())):
+            with acl_check("board_acl_role_attributes"), factory() as conn:
+                runtime_role(conn,login)
+                with acl_check("board_acl_schema_create"):
+                    check(conn.execute("SELECT count(*) FROM pg_namespace n WHERE n.nspname IN ('public','voting','voting_admin','voting_tally','voting_board') AND has_schema_privilege(current_user,n.oid,'CREATE')").fetchone() == (0,),"Runtime schema CREATE allowed")
+                with acl_check("board_acl_function_execute"):
+                    rows = conn.execute("SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='voting_board' AND has_function_privilege(current_user,p.oid,'EXECUTE')").fetchall()
+                    check({r[0] for r in rows} == expected,"Unexpected Board execution surface")
+            with acl_check("board_acl_direct_sql"):
+                for query in ("SELECT * FROM voting.accepted_ballots","DELETE FROM voting.publications","SELECT * FROM voting_board.evidence","SET ROLE voting_owner"):
+                    real.deny(factory,query)
+        with acl_check("board_acl_public_grants"), self.db.voting_fixture() as conn:
             check(conn.execute("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE n.nspname='voting_board' AND a.grantee=0").fetchone() == (0,),"PUBLIC EXECUTE allowed")
-            rows = conn.execute("SELECT p.proname,pg_get_userbyid(p.proowner),p.prosecdef,p.proconfig FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='voting_board'").fetchall()
             paths = {
                 '_actor':'pg_catalog, voting_board, voting_admin, pg_temp',
                 '_input':'pg_catalog, voting_board, voting, voting_tally, voting_admin, pg_temp',
                 'finish':'pg_catalog, voting_board, voting, voting_admin, voting_tally, pg_temp',
                 **dict.fromkeys(('publication_input','read_public','catalogue'),'pg_catalog, voting_board, voting, pg_temp'),
                 **dict.fromkeys(('immutable','terminal_state'),'pg_catalog, voting_board, pg_temp')}
-            check(len(rows) == 8 and {row[0] for row in rows} == set(paths)
-                and all(owner == 'voting_owner' and secure and config == ['search_path='+paths[name]]
-                    for name,owner,secure,config in rows),"Unsafe Board definer")
-            check(conn.execute("SELECT actor_principal_id,actor_type FROM voting.voting_audit_events WHERE election_id=%s AND event_type='ELECTION_PUBLISHED'",(self.election,)).fetchall() == [(self.principal,'ADMIN')],"Publisher audit actor mismatch")
+            with acl_check("board_acl_function_metadata"):
+                rows = conn.execute("SELECT p.proname,pg_get_userbyid(p.proowner),p.prosecdef,p.proconfig FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='voting_board'").fetchall()
+                check(len(rows) == 8 and {row[0] for row in rows} == set(paths)
+                    and all(owner == 'voting_owner' and secure and config == ['search_path='+paths[name]]
+                        for name,owner,secure,config in rows),"Unsafe Board definer")
+            with acl_check("board_acl_audit_actor"):
+                check(conn.execute("SELECT actor_principal_id,actor_type FROM voting.voting_audit_events WHERE election_id=%s AND event_type='ELECTION_PUBLISHED'",(self.election,)).fetchall() == [(self.principal,'ADMIN')],"Publisher audit actor mismatch")
         checkpoint("board_acl", self.stage)
 
 

@@ -2,8 +2,121 @@
 
 Branch `test/full-election-e2e`, base `7dcdc60`. This change composes the reviewed
 two-voter/Tally journey with the real Publisher and Public Board, ending at
-PUBLISHED. **This new combined gate has not executed on Ubuntu Actions.** Local
-results below are regression evidence, not a real-service PASS.
+PUBLISHED. Run 1 reached PUBLISHED and passed public verification/immutability,
+then failed at `board_acl`. The targeted correction below has **not** run on
+Ubuntu Actions. Local regression results are not a complete real-service PASS.
+
+## Run 1 board_acl correction: review against 65c7288
+
+The defect is in the combined test's role model, not an established excess
+database privilege. Its blanket assertion required every runtime role to have
+NOINHERIT and no memberships. The unchanged trusted
+[Voting provisioning](../scripts/voting_postgres_ci.py) explicitly creates
+`voting_ballot_login` with INHERIT and grants exactly `voting_ballot_service`
+WITH INHERIT TRUE, SET FALSE (ADMIN defaults false). The unchanged
+[Voting migration](../migrations/voting/versions/d8f27a4c610b_anonymous_ballot_acceptance.py)
+grants that capability role only the reviewed Voting schema USAGE and three
+ballot RPC EXECUTEs, with no direct table access. The original combined role
+predicate necessarily rejects this intentionally provisioned login.
+
+The passing standalone [Board gate](../scripts/board_postgres_ci.py) checks the
+same Board execution surfaces and forbidden SQL but does not impose the erroneous
+blanket NOINHERIT/no-membership condition. Admin, Tally, Board and Publisher logins
+are separately provisioned NOINHERIT with no memberships; they retain that strict
+policy. Source proves the combined assertion is incompatible with provisioning.
+Run 1 did not identify its individual failing assertion, so the correction does
+not claim all subsequent checks have passed or exclude an additional later fault.
+
+The replacement role assertion checks the exact expected session role, LOGIN,
+absence of all elevated flags, and the appropriate INHERIT flag. Only
+`voting_ballot_login` may have the single expected parent edge, with ADMIN=false,
+INHERIT=true, SET=false. Extra incoming/outgoing edges, duplicate grants, another
+parent or changed membership options fail. The inherited service role must remain
+NOLOGIN/NOINHERIT/non-elevated, have no parents, and have no other members. No
+permissions, provisioning SQL, applied migration or production code changes.
+
+All existing CREATE, exact Board EXECUTE, SQLSTATE-42501 direct denial, PUBLIC
+grant, eight-function owner/SECURITY DEFINER/search_path and exact publication
+audit actor assertions remain strict. In particular, no permissive proconfig
+normalization was introduced: the exact per-function array must still match the
+unchanged migration. Formatting or other discrepancies will fail under their own
+fixed identifier. Source comparison confirms every non-role ACL query and every
+forbidden SQL probe is unchanged. Diagnostic contexts annotate and rethrow the
+same exception; they issue no SQL, change no transactions, and retain the most
+specific nested check if a connection boundary also observes the exception.
+
+Only these fixed identifiers can enter ACL diagnostics:
+
+```text
+board_acl_role_attributes
+board_acl_schema_create
+board_acl_function_execute
+board_acl_direct_sql
+board_acl_public_grants
+board_acl_function_metadata
+board_acl_audit_actor
+```
+
+Failures contain fixed stage/check, assertion_error or database_error, and only
+an explicitly allowlisted SQLSTATE (otherwise unavailable). No SQL, result rows,
+parameters, response bodies, exception messages, tracebacks or HTTP status are
+included in these ACL diagnostics. Example:
+
+```text
+FAIL: full_election_e2e stage=board_acl check=board_acl_role_attributes category=assertion_error sqlstate=unavailable
+FAIL: full_election_e2e stage=board_acl check=board_acl_direct_sql category=database_error sqlstate=25006
+```
+
+The second example is a **failed test**, not an accepted ACL denial: only the
+unchanged strict deny helper's InsufficientPrivilege/42501 outcome succeeds.
+An unauthorized SQL success, unexpected database exception or other exception
+still fails. The new catalogue-projection unit tests run the actual assertions
+and strict deny helper, mutate each security property, and verify rejection and
+sanitized diagnostics. They do not execute PostgreSQL or establish actual ACLs.
+
+Current validation on this corrected checkout:
+
+| Check | Actual result |
+|---|---|
+| Full backend/crypto pytest | 1,002 passed, including 55 new ACL regressions. |
+| Frontend unit/component/crypto | 108 passed. |
+| Existing authentication / voting / Admin / Tally / Board browser suites | 7 / 7 / 2 / 2 / 3 passed (21 total), synthetic services. |
+| Frontend TypeScript checks and production build | PASS. |
+| Crypto TypeScript build / recovery tests | PASS / 2 passed. |
+| Dependency checks | pip check, reviewed Python versions, both locked npm trees PASS; no lock changes. |
+| Syntax and migration graphs | 163 Python, 7 JSON, 10 YAML, 67 Bash bodies/scripts PASS; unchanged RA 15 and Voting/Board 6 revisions. |
+| Offline PostgreSQL SQL syntax | All three corrected role SELECTs and 125 unchanged migration literals parsed with pglast 8.9; no execution or application namespace/type resolution. |
+| Non-role SQL / standalone gates / protected sources | Unchanged versus reviewed HEAD. |
+| Changed-source secret scan / git diff --check | PASS. |
+| Corrected live combined gate / standalone PG gates locally | NOT RUN; no local PostgreSQL access. |
+
+Windows browser runs used the existing Edge configuration; Ubuntu uses Chromium.
+The existing Vite blindrsa browser-externalization notice remains. No dependency,
+browser fixture or frontend source changes were needed.
+
+Changed-file inventory for this correction (three files):
+
+- [Combined coordinator](../scripts/full_election_e2e.py): narrow role model fix and diagnostics.
+- [New ACL regressions](../tests/test_full_election_acl.py).
+- [This updated review report](./29-full-election-e2e.md).
+
+The existing standalone Board and Tally coordinators/tests, workflow, migration
+history, production services, original regression assertions and dependency locks
+are unchanged. The user's evidence establishes standalone Board PASS in Run 1;
+that is prior CI evidence, not a new local execution. The same workflow retains
+both standalone gates before the combined journey.
+
+A human-approved push of this patch to `test/full-election-e2e` triggers the
+unchanged Ubuntu workflow. Rerunning an old run without publishing the correction
+tests the old commit. The next run must pass `board_acl`, then original browser
+receipt recovery, remaining lifecycle ACL/audit checks and verified owned cleanup.
+Expected success tail is `checkpoint=board_acl`, `checkpoint=receipts`,
+`checkpoint=acl`, and the existing/final `checkpoint=cleanup` lines. Any failure
+inside the seven ACL groups now identifies the exact group without sensitive
+data. Live membership projections, proconfig representation and all later checks
+remain pending that run. No commit, push, merge, database connection, migration,
+real-credential/production-private-key access or stash removal was performed
+during this fix. Unit/crypto tests use generated test material only.
 
 ## Architecture and key custody
 
@@ -169,7 +282,8 @@ Services are started by the coordinator over private pipes with input-free
 loopback origins; no operator password commands or production-launcher overrides
 are required. Do not invoke this against a manually selected cluster.
 
-Expected sanitized checkpoints (not observed real-service evidence):
+Expected successful-run checkpoints (reference output; Run 1 evidence and the
+still-pending tail are distinguished in the correction review above):
 
 ```text
 PASS: full_election_e2e checkpoint=publication_migration
@@ -204,7 +318,8 @@ only when known and allowlisted. No raw exception, SQL, parameters or payload.
 
 ## Actual validation and changed files
 
-Executed on this combined checkout (Windows), not copied from previous branches:
+Original pre-publication validation (before Run 1; superseded for this correction
+by the current results above), executed on the combined Windows checkout:
 
 | Validation | Actual result |
 |---|---|
@@ -264,8 +379,11 @@ reuses reviewed verification primitives and external pins, not an independently
 authored cryptographic implementation. No decryption keys or individual plaintext
 are published. The same-user runner and loopback HTTP are local-demo boundaries.
 
-Real PG migration resolution, all new inter-service authorization, final PUBLISHED
-recovery, concurrent publication/rollback/ACLs and owned-resource teardown remain
-**pending the first Ubuntu Actions execution**. No local PostgreSQL connection,
-migration execution, production key access, commit/push/merge or stash/worktree
-deletion was performed. Stop for human review before publication of this branch.
+Run 1 exercised real migration resolution, inter-service authorization, both
+browser acceptances, Tally, concurrent publication/rollback and public evidence
+verification, according to the supplied CI checkpoints. It did not pass the
+complete gate: corrected ACL assertions, final PUBLISHED browser recovery,
+remaining checks and verified teardown still require the next Ubuntu run.
+No local PostgreSQL connection, migration execution, production key access,
+commit/push/merge or stash/worktree deletion was performed during this correction.
+Stop for human review before publishing this patch.
