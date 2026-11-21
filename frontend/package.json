@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test:browser": "playwright test",
     "test:voting-browser": "playwright test --config playwright.voting.config.ts",
-    "test:admin-browser": "playwright test --config playwright.admin.config.ts"
+    "test:admin-browser": "playwright test --config playwright.admin.config.ts",
+    "test:tally-browser": "playwright test --config playwright.tally.config.ts"
   },
   "dependencies": {
     "@cloudflare/blindrsa-ts": "0.4.6",
