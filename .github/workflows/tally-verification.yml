@@ -1,0 +1,59 @@
+name: Restricted Tally PostgreSQL verification
+"on":
+  push:
+    branches: [feat/tally-verification]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tally-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.11.9"
+      - name: Locked dependencies and full database-free regression
+        run: |
+          umask 077
+          python -m venv "$RUNNER_TEMP/tally-python"
+          tally_python="$RUNNER_TEMP/tally-python/bin/python"
+          printf 'EVOTE_TEST_PYTHON=%s\n' "$tally_python" >> "$GITHUB_ENV"
+          "$tally_python" -m pip install --no-deps -r backend/voting/requirements.lock.txt
+          "$tally_python" -m pip check
+          "$tally_python" scripts/voting_postgres_ci.py --verify-dependencies
+          npm --prefix frontend ci --ignore-scripts
+          npm --prefix crypto_interop ci --ignore-scripts
+          npm --prefix crypto_interop run build
+          EVOTE_TEST_NODE="$(command -v node)" "$tally_python" -m pytest tests/ crypto_interop/ -q
+          node --test crypto_interop/dist/pending_state.test.js
+      - name: Frontend and browser regression
+        working-directory: frontend
+        run: |
+          npm run build
+          npm test
+          npx --no-install playwright install --with-deps chromium
+          npm run test:browser
+          npm run test:voting-browser
+          npm run test:admin-browser
+          npm run test:tally-browser
+      - name: Real disposable PostgreSQL 18 Tally and ACL tests
+        run: |
+          "$EVOTE_TEST_PYTHON" scripts/tally_postgres_ci.py --allow-ephemeral-ci-database
+      - name: Source and dependency lock integrity
+        run: |
+          git diff --exit-code
+          git diff --check

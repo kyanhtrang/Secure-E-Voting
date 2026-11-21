@@ -5,6 +5,7 @@ import { SessionProvider } from './auth/session';
 import { Shell } from './components/shell';
 import { PageHeading, TextLink } from './components/ui';
 import { config, type AppConfig } from './config';
+import { TallyWorkspace } from './tally/workspace';
 import { AdminWorkspace } from './admin/workspace';
 import { AdminOverview, AdminSection } from './pages/admin';
 import { AnonymousVoting, BulletinBoard, PublicOverview, PublicResults, VerifyReceipt } from './pages/public';
@@ -24,7 +25,8 @@ export function App({ settings = config, client }: { settings?: AppConfig; clien
         <Route path="credentials" element={settings.votingEnabled ? <VotingCredentials /> : <Credentials />} />
       </Route>
     </Route>
-    <Route path="/admin" element={<Shell workspace="admin" adminEnabled={settings.adminEnabled ?? false} />}>
+    <Route path="/admin" element={<Shell workspace="admin" adminEnabled={settings.adminEnabled || settings.tallyEnabled || false} />}>
+      {settings.tallyEnabled && <Route path="tally" element={<TallyWorkspace />} />}
       <Route index element={settings.adminEnabled ? <AdminWorkspace /> : <AdminOverview />} /><Route path=":section" element={settings.adminEnabled ? <AdminWorkspace /> : <AdminSection />} />
     </Route>
     <Route path="/public" element={<Shell workspace="public" />}>
