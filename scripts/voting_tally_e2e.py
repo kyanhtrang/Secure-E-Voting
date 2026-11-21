@@ -303,7 +303,7 @@ def verify_report(result, election, config_hash, candidates, pin):
           "accepted_total", "valid_total", "invalid_total", "counted_total", "candidate_counts", "invalid_reasons"}, "Nonaggregate HTTP data")
 
 
-def run(node, signer, stage):
+def run(node, signer, stage, *, publication=None):
     root = require_ci()
     with ExitStack() as resources:
         stage[0] = "provision"
@@ -324,6 +324,8 @@ def run(node, signer, stage):
         guard.admin_ci.migrate(real.ra_ci, rt, passwords["ra_migrator_login"], "ra", "bf932d0f8702")
         guard.admin_ci.migrate(real.vote_ci, vt, passwords["voting_migrator_login"], "voting", "af821c9e7601")
         tally_ci.migrate(vt, passwords["voting_migrator_login"])
+        if publication is not None:
+            publication.provision(voting, vb, passwords)
         checkpoint("migrations")
         def connect(owned, role, fixture=False): return guard.connection(owned, role, passwords[role], fixture=fixture)
         db = real.Connections(connect(ra,"ra_migrator_login",True),connect(ra,"ra_auth_login"),connect(ra,"ra_issuance_login"),
@@ -344,10 +346,11 @@ def run(node, signer, stage):
         def verifier(password):
             salt = secrets.token_bytes(16)
             return dict(salt=b64encode(salt), digest=b64encode(hashlib.scrypt(password.encode(), salt=salt, n=2**14,r=8,p=1,dklen=32)))
-        origin = resources.enter_context(guard.service_process("admin", dict(
+        admin_config = dict(
             voting=voting.wire(), ra=ra.wire(), voting_password=passwords["voting_admin_login"].get_secret_value(),
             publisher_password=passwords["ra_election_publisher_login"].get_secret_value(), principal=str(principal), username="synthetic-admin-tally",
-            authority_key=str(files["authority"][0]), unlock=files["authority"][1].get_secret_value(), pin=b64encode(pin), keysets=catalogue, **verifier(admin_password))))
+            authority_key=str(files["authority"][0]), unlock=files["authority"][1].get_secret_value(), pin=b64encode(pin), keysets=catalogue, **verifier(admin_password))
+        origin = resources.enter_context(guard.service_process("admin", admin_config))
         token = guard.http(origin,"/api/v1/admin/auth/login",200,method="POST",data={"username":"synthetic-admin-tally","password":admin_password})["access_token"]
         stage[0] = "admin_draft"
         election, base = guard.create_election(origin,token,db,principal,first,"accepted",pin,catalogue,stage)
@@ -375,6 +378,10 @@ def run(node, signer, stage):
         stage[0] = "open_tally_denied"
         tally_http(tally_origin,path+"/run",409,token=tally_token,body={},error_code="CONFLICT")
         checkpoint("open_tally_denied")
+        published = None
+        if publication is not None:
+            published = resources.enter_context(publication.services(voting, passwords, db, directory, evidence,
+                pin, snapshot_pin, principal, origin, admin_config, admin_password, election, tally_token))
         vote_origin = resources.enter_context(guard.service_process("voting", dict(target=voting.wire(),pin=b64encode(pin),password=passwords["voting_ballot_login"].get_secret_value())))
         receipts, voter_services = [], []
         with ExitStack() as browsers:
@@ -394,6 +401,8 @@ def run(node, signer, stage):
                 e2e_auth.check_session(db.ra_fixture,voter,voter_token)
                 if index == 1: e2e_auth.check_authentication(voter_services,db.ra_fixture,db.ra_auth,election)
                 tally_http(tally_origin,"auth/me",401,token=voter_token)
+                if published is not None:
+                    published.reject_voter(voter_token)
                 guard.http(origin,"/api/v1/admin/elections",401,token=voter_token)
                 front = resources.enter_context(real.frontend(node,ra_origin,vote_origin,pin))
                 stage[0] = "browser"
@@ -436,6 +445,8 @@ def run(node, signer, stage):
                 tally_http(wrong,"auth/logout",204,token=wrong_token,body={})
             check(tally_http(tally_origin,path+"/report",200,token=tally_token) == result,"Failed verifier altered committed report")
             checkpoint("configuration_rejected")
+            if published is not None:
+                published.finish(result, receipts, voter_services, operator, tally_token)
             stage[0] = "receipts"
         assert_ballots(db,election,(first,second),receipts)
         checkpoint("receipts")
