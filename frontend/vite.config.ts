@@ -25,11 +25,17 @@ export default defineConfig(({ mode }) => {
   if (enabled && process.env.VITE_ENABLE_ADMIN === 'true' && [new URL(raTarget).port,new URL(votingTarget).port].includes(new URL(adminTarget).port)) throw new Error('Admin requires a separate loopback port.');
   const tallyTarget=localTarget(process.env.TALLY_DEMO_TARGET ?? 'http://127.0.0.1:8005');
   if (enabled && process.env.VITE_ENABLE_TALLY === 'true' && [raTarget,votingTarget,adminTarget].some(value => new URL(value).port === new URL(tallyTarget).port)) throw new Error('Tally requires a separate loopback port.');
+  const boardTarget=localTarget(process.env.BOARD_DEMO_TARGET ?? 'http://127.0.0.1:8006');
+  if(enabled && process.env.VITE_ENABLE_BOARD==='true' && [raTarget,votingTarget,adminTarget,tallyTarget].some(value=>new URL(value).port===new URL(boardTarget).port))throw new Error('Board requires a separate loopback port.');
   const headers = { 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' };
   // Preserve Host AND Origin. The existing backend checks that they agree;
   // changeOrigin/Origin stripping would bypass that check or break local access.
   const proxy = enabled ? {
+    ...(process.env.VITE_ENABLE_BOARD==='true'?{'^/api/v1/board':{target:boardTarget,changeOrigin:false,xfwd:false,followRedirects:false,
+      configure(proxy:Parameters<NonNullable<import('vite').ProxyOptions['configure']>>[0]){
+        proxy.on('proxyReq',(outgoing,incoming)=>{if(['authorization','cookie','proxy-authorization','x-voter-id','x-ra-token','x-request-id','x-username','x-admin-token','x-admin-id','x-tally-token'].some(name=>incoming.headers[name]))outgoing.destroy(new Error('Anonymous Board request required'));});
+      }}}:{}),
     ...(process.env.VITE_ENABLE_TALLY === 'true' ? { '^/api/v1/tally/': { target:tallyTarget, changeOrigin:false, xfwd:false, followRedirects:false } } : {}),
     ...(process.env.VITE_ENABLE_ADMIN === 'true' ? { '^/api/v1/admin/': { target:adminTarget, changeOrigin:false, xfwd:false, followRedirects:false } } : {}),
     '^/api/v1/ra/auth/(login|me|logout)$': {

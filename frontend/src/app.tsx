@@ -12,8 +12,11 @@ import { AnonymousVoting, BulletinBoard, PublicOverview, PublicResults, VerifyRe
 import { Credentials, ElectionDetail, Elections, Login, RequireSession, VoterOverview } from './pages/voter';
 import { VotingBallot, VotingCredentials, VotingElectionDetail, VotingElections } from './pages/voting';
 import { VotingProvider } from './voting/context';
+import { PublicWorkspace } from './board/workspace';
 
 export function App({ settings = config, client }: { settings?: AppConfig; client?: AuthClient }) {
+  const publicPage=(mode:'list'|'results'|'verify'|'board',fallback:ReactNode)=>settings.boardEnabled && settings.boardPins
+    ? <PublicWorkspace mode={mode} pins={settings.boardPins} />:fallback;
   const routes=<Routes>
     <Route path="/" element={<Navigate to="/voter" replace />} />
     <Route path="/voter" element={<SessionProvider enabled={settings.authEnabled} {...(client ? { client } : {})}><Shell workspace="voter" /></SessionProvider>}>
@@ -30,8 +33,8 @@ export function App({ settings = config, client }: { settings?: AppConfig; clien
       <Route index element={settings.adminEnabled ? <AdminWorkspace /> : <AdminOverview />} /><Route path=":section" element={settings.adminEnabled ? <AdminWorkspace /> : <AdminSection />} />
     </Route>
     <Route path="/public" element={<Shell workspace="public" />}>
-      <Route index element={<PublicOverview />} /><Route path="results/:electionId" element={<PublicResults />} />
-      <Route path="board" element={<BulletinBoard />} /><Route path="verify" element={<VerifyReceipt />} />
+      <Route index element={publicPage('list',<PublicOverview />)} /><Route path="results/:electionId" element={publicPage('results',<PublicResults />)} />
+      <Route path="board" element={publicPage('board',<BulletinBoard />)} /><Route path="verify" element={publicPage('verify',<VerifyReceipt />)} />
     </Route>
     <Route element={<Shell workspace="public" />}><Route path="/vote" element={settings.votingEnabled ? <VotingBallot /> : <AnonymousVoting />} />
       <Route path="*" element={<><PageHeading eyebrow="PAGE NOT FOUND" title="This page isn’t available" description="Choose a workspace to continue." /><TextLink to="/public">Go to public elections</TextLink></>} /></Route>

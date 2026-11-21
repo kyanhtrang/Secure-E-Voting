@@ -1,6 +1,7 @@
 declare const __LOCAL_RA_DEMO__: boolean;
 
-export interface AppConfig { authEnabled: boolean; adminEnabled?: boolean; tallyEnabled?: boolean; votingEnabled?: boolean; authorityPin?: string }
+import type { BoardPins } from './board/verification';
+export interface AppConfig { authEnabled: boolean; adminEnabled?: boolean; tallyEnabled?: boolean; votingEnabled?: boolean; authorityPin?: string; boardEnabled?:boolean; boardPins?:BoardPins }
 
 export function localAuthEnabled(explicit: boolean, location: Pick<Location, 'hostname' | 'protocol'>): boolean {
   return explicit && location.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(location.hostname);
@@ -8,7 +9,10 @@ export function localAuthEnabled(explicit: boolean, location: Pick<Location, 'ho
 
 export const config: AppConfig = { tallyEnabled: localAuthEnabled(__LOCAL_RA_DEMO__,window.location) && import.meta.env.VITE_ENABLE_TALLY === 'true', adminEnabled: localAuthEnabled(__LOCAL_RA_DEMO__,window.location) && import.meta.env.VITE_ENABLE_ADMIN === 'true', authEnabled: localAuthEnabled(__LOCAL_RA_DEMO__, window.location),
   votingEnabled:localAuthEnabled(__LOCAL_RA_DEMO__,window.location) && import.meta.env.VITE_ENABLE_VOTING === 'true',
-  authorityPin:import.meta.env.VITE_MANIFEST_AUTHORITY_PIN ?? '' };
+  authorityPin:import.meta.env.VITE_MANIFEST_AUTHORITY_PIN ?? '',
+  boardEnabled:localAuthEnabled(__LOCAL_RA_DEMO__,window.location) && import.meta.env.VITE_ENABLE_BOARD==='true',
+  boardPins:{authority:import.meta.env.VITE_MANIFEST_AUTHORITY_PIN??'',evidence:import.meta.env.VITE_EVIDENCE_PIN??'',evidenceKeyId:import.meta.env.VITE_EVIDENCE_KEY_ID??'',
+    publication:import.meta.env.VITE_PUBLICATION_PIN??'',publicationKeyId:import.meta.env.VITE_PUBLICATION_KEY_ID??''} };
 
 // These are capability declarations from source inspection, not API responses.
 // No endpoint or data shape is assumed for the missing services.
