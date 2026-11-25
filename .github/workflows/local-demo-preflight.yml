@@ -1,0 +1,36 @@
+name: Offline local-demo safety contract
+"on":
+  push:
+    branches: [feat/security-local-demo]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.11.9"
+      - name: Check public plan with standard library only
+        run: python -I -S scripts/local_demo_preflight.py check --public-plan deployment/evote-local-demo-plan.json
+      - name: Install existing locked test dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/demo-policy-python"
+          "$RUNNER_TEMP/demo-policy-python/bin/python" -m pip install --no-deps -r backend/voting/requirements.lock.txt
+          "$RUNNER_TEMP/demo-policy-python/bin/python" -m pip check
+      - name: Offline preflight and lifecycle regressions only
+        run: |
+          "$RUNNER_TEMP/demo-policy-python/bin/python" -m pytest tests/test_local_demo_policy.py tests/test_local_demo_lifecycle.py -q
+          git diff --exit-code
+          git diff --check
