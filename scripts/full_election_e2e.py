@@ -283,6 +283,7 @@ class Publication:
         board_ci.aggregate_rows(self.db.voting_fixture,election,"TALLIED")
         checkpoint("publication_rollback", self.stage)
         self.stage[0] = "publication_concurrent"
+        self.before_publication(receipts)
         with ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda _:self.publish(),range(4)))
         check(all(r == results[0] for r in results) and self.publish() == results[0],"Publication retry changed evidence")
@@ -323,6 +324,9 @@ class Publication:
             check(conn.execute("SELECT e.status,c.phase,c.ra_ready FROM voting.elections e JOIN voting_admin.controls c USING(election_id) WHERE election_id=%s",(election,)).fetchone() == ("PUBLISHED","PUBLISHED",True),"Publication lifecycle mismatch")
         # Original browser contexts are acknowledged only after these checks; they
         # recover their original receipts and prove duplicate 409 in PUBLISHED.
+
+    def before_publication(self, receipts):
+        """Optional hosted UI composition point; the default gate remains unchanged."""
 
     def independent_checks(self, public, receipts):
         for field in ("snapshot","snapshot_evidence","tally","publication"):
