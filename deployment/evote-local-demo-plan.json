@@ -1,0 +1,190 @@
+{
+  "database_storage": "owned-named-volume-preserve-on-stop",
+  "databases": {
+    "ra": {
+      "container": "evote-local-04b5cc8f27b14587aca8c2392d7b083f-ra",
+      "host": "127.0.0.1",
+      "marker": "secure-evoting-local-disposable:cb23afbc-5d48-48a8-9bd8-eced5b2604da",
+      "name": "ra_demo_local_04b5cc8f27b14587aca8c2392d7b083f",
+      "owner": "ra_owner",
+      "port": 55432,
+      "volume": "evote-local-04b5cc8f27b14587aca8c2392d7b083f-ra-data"
+    },
+    "voting": {
+      "container": "evote-local-04b5cc8f27b14587aca8c2392d7b083f-voting",
+      "host": "127.0.0.1",
+      "marker": "secure-evoting-local-disposable:5e35d7f4-f775-4806-996f-b76f9c90502d",
+      "name": "voting_demo_local_04b5cc8f27b14587aca8c2392d7b083f",
+      "owner": "voting_owner",
+      "port": 55433,
+      "volume": "evote-local-04b5cc8f27b14587aca8c2392d7b083f-voting-data"
+    }
+  },
+  "execution_ready": false,
+  "identifiers": {
+    "admin": "43252772-99eb-4b9f-9fac-1a20bc8ee043",
+    "profile": "04b5cc8f-27b1-4587-aca8-c2392d7b083f",
+    "ra_marker": "cb23afbc-5d48-48a8-9bd8-eced5b2604da",
+    "tally": "5bffe1f8-b2ff-40fa-b083-81fff971945b",
+    "voter_a": "ea48b887-5c83-490d-b001-58394dd17bae",
+    "voter_b": "aa5ca1eb-dea5-4b9f-80fc-c84a34e4f1a2",
+    "voting_marker": "5e35d7f4-f775-4806-996f-b76f9c90502d"
+  },
+  "keys": "generate-fresh-only-after-approval",
+  "migration_heads": {
+    "ra": "bf932d0f8702",
+    "voting": "f8b31c2d970a"
+  },
+  "mode": "review-only",
+  "network": "evote-local-04b5cc8f27b14587aca8c2392d7b083f",
+  "platform": "windows11-dedicated-ubuntu24.04-vm",
+  "postgres_image": "postgres:18-bookworm@sha256:ece55f7868da684e400f82f1030a050718adbdd65c23aa500c486f6e2950dc0f",
+  "purpose": "synthetic-only",
+  "reviewed_base": "9ce5571393801297f9ced8a113c341a4404d250d",
+  "services": {
+    "admin": {
+      "evidence": "none",
+      "keys": [
+        "manifest_signing"
+      ],
+      "port": 8002,
+      "roles": [
+        "voting_admin_login",
+        "ra_election_publisher_login"
+      ],
+      "verifiers": [
+        "admin"
+      ]
+    },
+    "board": {
+      "evidence": "none",
+      "keys": [],
+      "port": 8006,
+      "roles": [
+        "voting_board_login"
+      ],
+      "verifiers": []
+    },
+    "publisher": {
+      "evidence": "read-only",
+      "keys": [
+        "publication_signing"
+      ],
+      "port": 8007,
+      "roles": [
+        "voting_publication_login"
+      ],
+      "verifiers": []
+    },
+    "ra_a": {
+      "evidence": "none",
+      "keys": [
+        "ra_signing",
+        "ra_recovery"
+      ],
+      "port": 8000,
+      "roles": [
+        "ra_auth_login",
+        "ra_issuance_login"
+      ],
+      "verifiers": [
+        "voter_a"
+      ]
+    },
+    "ra_b": {
+      "evidence": "none",
+      "keys": [
+        "ra_signing",
+        "ra_recovery"
+      ],
+      "port": 8003,
+      "roles": [
+        "ra_auth_login",
+        "ra_issuance_login"
+      ],
+      "verifiers": [
+        "voter_b"
+      ]
+    },
+    "tally": {
+      "evidence": "read-write",
+      "keys": [
+        "tally_decryption",
+        "evidence_signing"
+      ],
+      "port": 8005,
+      "roles": [
+        "voting_tally_login"
+      ],
+      "verifiers": [
+        "tally"
+      ]
+    },
+    "voting": {
+      "evidence": "none",
+      "keys": [],
+      "port": 8001,
+      "roles": [
+        "voting_ballot_login"
+      ],
+      "verifiers": []
+    },
+    "web_a": {
+      "evidence": "none",
+      "keys": [],
+      "port": 5174,
+      "roles": [],
+      "verifiers": []
+    },
+    "web_admin": {
+      "evidence": "none",
+      "keys": [],
+      "port": 5173,
+      "roles": [],
+      "verifiers": []
+    },
+    "web_b": {
+      "evidence": "none",
+      "keys": [],
+      "port": 5175,
+      "roles": [],
+      "verifiers": []
+    }
+  },
+  "source_digest": "9a7598a92f67029fbf728712d612fec2fccb302cf3c43ff4e7a890caa8774773",
+  "version": 1,
+  "vm_requirements": {
+    "docker_socket_to_apps": false,
+    "host_database_forwarding": false,
+    "host_shares": false
+  },
+  "voters": [
+    "demo-local/demo-voter-001",
+    "demo-local/demo-voter-002"
+  ],
+  "web_targets": {
+    "web_a": {
+      "ra": "http://127.0.0.1:8000",
+      "voting": "http://127.0.0.1:8001"
+    },
+    "web_admin": {
+      "admin": "http://127.0.0.1:8002",
+      "board": "http://127.0.0.1:8006",
+      "publisher": "http://127.0.0.1:8007",
+      "tally": "http://127.0.0.1:8005"
+    },
+    "web_b": {
+      "ra": "http://127.0.0.1:8003",
+      "voting": "http://127.0.0.1:8001"
+    }
+  },
+  "windows_forward": {
+    "bind": "127.0.0.1",
+    "ports": [
+      5173,
+      5174,
+      5175
+    ],
+    "transport": "host-key-pinned-ssh-local-forward"
+  }
+}
