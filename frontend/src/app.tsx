@@ -30,7 +30,7 @@ export function App({ settings = config, client }: { settings?: AppConfig; clien
     </Route>
     <Route path="/admin" element={<Shell workspace="admin" adminEnabled={settings.adminEnabled || settings.tallyEnabled || false} />}>
       {settings.tallyEnabled && <Route path="tally" element={<TallyWorkspace />} />}
-      <Route index element={settings.adminEnabled ? <AdminWorkspace /> : <AdminOverview />} /><Route path=":section" element={settings.adminEnabled ? <AdminWorkspace /> : <AdminSection />} />
+      <Route index element={settings.adminEnabled ? <AdminWorkspace publicationEnabled={settings.publicationEnabled ?? false} /> : <AdminOverview />} /><Route path=":section" element={settings.adminEnabled ? <AdminWorkspace publicationEnabled={settings.publicationEnabled ?? false} /> : <AdminSection />} />
     </Route>
     <Route path="/public" element={<Shell workspace="public" />}>
       <Route index element={publicPage('list',<PublicOverview />)} /><Route path="results/:electionId" element={publicPage('results',<PublicResults />)} />
