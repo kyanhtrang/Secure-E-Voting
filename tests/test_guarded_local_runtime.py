@@ -288,25 +288,35 @@ def test_function_contracts_match_unmodified_applied_migrations_and_reviewed_vot
             assert found[signature] == db.expected_path(signature,policy.ROLE_DATABASE[login])
 
 
-def raw_container_fixture(plan):
+def raw_container_fixture(plan,kind='ra'):
     from tests.test_local_demo_policy import observation
-    actual = observation(plan)
+    actual = observation(plan,kind)
     actual.update(State={'Running':True},Image='sha256:'+'c'*64)
     actual['Config'].update(Entrypoint=['/bin/sh'],Cmd=boundary.PG_COMMAND)
     actual['Config']['Env'] = ['PATH=/usr/bin']+actual['Config']['Env']
     actual['HostConfig']['Tmpfs'] = {'/run/evote-secrets':'rw,noexec,nosuid,nodev,mode=0755'}
-    actual['Mounts'].append(dict(Type='tmpfs',Destination='/run/evote-secrets',RW=True))
     actual['NetworkSettings']['Networks'] = {plan['network']:{}}
     image = {'Id':actual['Image'],'Config':{'Env':['PATH=/usr/bin'],'Labels':{'immutable-image-label':'public-metadata'}}}
     actual['Config']['Labels']['immutable-image-label'] = 'public-metadata'
-    volume = dict(Name=plan['databases']['ra']['volume'],Driver='local',Options=None,Labels=policy.labels(plan,'ra'))
+    volume = dict(Name=plan['databases'][kind]['volume'],Driver='local',Options=None,Labels=policy.labels(plan,kind))
     network = dict(Name=plan['network'],Driver='bridge',Internal=True,
         Labels={'secure-evoting-local-demo':plan['identifiers']['profile'],'secure-evoting-purpose':'synthetic-only'})
     return actual,image,volume,network
 
 
+def mock_secret_metadata(monkeypatch):
+    def read(argv):
+        if argv[-2:] == ['/bin/cat','/proc/self/mountinfo']:
+            return b'37 24 0:30 / /run/evote-secrets rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,mode=755\n'
+        if argv[-2:] == ['--','/run/evote-secrets']: return b'directory|755\n'
+        if argv[-2:] == ['--','/run/evote-secrets/bootstrap-password']: return b'regular file|600|postgres|postgres|1|64\n'
+        raise AssertionError('Unexpected metadata command')
+    monkeypatch.setattr(boundary,'command',read)
+
+
 @pytest.mark.parametrize('mutation',[None,'extra_environment','extra_mount','mutable_image','lan','unowned_volume','unsafe_logs','extra_network'])
 def test_raw_docker_collector_retains_all_mounts_env_overrides_and_image_identity(plan,mutation,monkeypatch):
+    mock_secret_metadata(monkeypatch)
     actual,image,volume,network = raw_container_fixture(plan)
     if mutation == 'extra_environment': actual['Config']['Env'].append('POSTGRES_PASSWORD=SYNTHETIC_CANARY')
     if mutation == 'extra_mount': actual['Mounts'].append({'Type':'bind','Destination':'/var/run/docker.sock'})

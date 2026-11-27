@@ -33,7 +33,7 @@ from backend.ra.demo_session_service import DemoSessionService
 from crypto_interop.gate import Peer, make_manifest, signed_bundle
 from deployment.local_demo_policy import ROLE_DATABASE, SERVICES, database_spec, fingerprint, labels, new_plan, require
 from deployment.local_runtime_apps import key_ids, public_keyset, ra_app
-from deployment.local_runtime_boundary import OwnedContainers, PG_COMMAND
+from deployment.local_runtime_boundary import OwnedContainers, PG_COMMAND, CONTAINER_PREDICATES, container_check
 from deployment.local_runtime_custody import _materials, service_package
 from deployment.local_runtime_database import IDENTITY_SQL, connection_factory
 from deployment.local_runtime_migrations import migrate
@@ -42,7 +42,21 @@ from deployment.local_runtime_voters import install
 from scripts import voting_postgres_ci as ci
 from scripts.local_demo_runtime import bind_election
 
-STAGES = {'preflight','containers','bootstrap','migrations','voters','runtime_acl','authentication','issuance','restart','denials','cleanup'}
+CONTAINER_CHECKPOINTS = frozenset({'container_image','container_network','container_ra_created','container_ra_secret',
+    'container_voting_created','container_voting_secret','container_ra_inspect','container_voting_inspect','containers'})
+STAGES = {'preflight','bootstrap','migrations','voters','runtime_acl','authentication','issuance','restart','denials','cleanup'} | CONTAINER_CHECKPOINTS
+
+
+def failure(state, error):
+    stage = state[0] if isinstance(state[0],str) and state[0] in STAGES else 'preflight'
+    category = 'database_error' if isinstance(error,psycopg.Error) else 'assertion_error'
+    if stage in CONTAINER_CHECKPOINTS:
+        predicate = getattr(error,'container_predicate',None)
+        predicate = predicate if isinstance(predicate,str) and predicate in CONTAINER_PREDICATES else 'unavailable'
+        return f'FAIL guarded_local_runtime stage={stage} predicate={predicate} category={category}'
+    sqlstate = getattr(error,'sqlstate',None)
+    sqlstate = sqlstate if sqlstate in {'42501','28P01','3D000','23505','P4101','P4103'} else 'unavailable'
+    return f'FAIL guarded_local_runtime stage={stage} category={category} sqlstate={sqlstate}'
 
 
 class HostedApproval:
@@ -88,26 +102,43 @@ def run(node, signer, state):
             return raw_connect(plan,kind,kind+'_migrator_login',passwords[kind+'_migrator_login'])
         return connect
     try:
-        state[0] = 'containers'
-        ci.docker('pull',plan['postgres_image'],timeout=180)
+        state[0] = 'container_image'
+        with container_check('image_pull'):
+            ci.docker('pull',plan['postgres_image'],timeout=180)
+        checkpoint('container_image')
         args = ['network','create','--internal','--driver','bridge','--label','secure-evoting-local-demo='+plan['identifiers']['profile'],
             '--label','secure-evoting-purpose=synthetic-only',plan['network']]
-        ci.docker(*args); network_created = True
+        state[0] = 'container_network'
+        with container_check('network_create'):
+            ci.docker(*args); network_created = True
+        checkpoint('container_network')
         for kind in ('ra','voting'):
             spec = database_spec(plan,kind)
             label_args = [item for key,value in labels(plan,kind).items() for item in ('--label',key+'='+value)]
-            ci.docker('volume','create',*label_args,spec['volume']); volumes.append(kind)
-            ids[kind] = ci.docker('run','--detach','--name',spec['container'],*label_args,'--network',plan['network'],
-                '--publish','127.0.0.1:'+str(spec['port'])+':5432','--mount','type=volume,src='+spec['volume']+',dst=/var/lib/postgresql',
-                '--tmpfs','/run/evote-secrets:rw,noexec,nosuid,nodev,mode=0755',
-                '--env','POSTGRES_PASSWORD_FILE=/run/evote-secrets/bootstrap-password',
-                '--env','POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=peer',
-                '--entrypoint','/bin/sh',plan['postgres_image'],*PG_COMMAND)
-            ci.docker('exec','--interactive',ids[kind],'/bin/sh','-ec',
-                'umask 077; cat > /run/evote-secrets/bootstrap-password.tmp; chown postgres:postgres /run/evote-secrets/bootstrap-password.tmp; mv /run/evote-secrets/bootstrap-password.tmp /run/evote-secrets/bootstrap-password',
-                input_text=boot[kind].get_secret_value())
-        owned = OwnedContainers(plan,approval,ids)
-        for kind in ('ra','voting'): owned.verify_container(kind)
+            state[0] = 'container_'+kind+'_created'
+            with container_check('volume_create'):
+                ci.docker('volume','create',*label_args,spec['volume']); volumes.append(kind)
+            with container_check('container_start'):
+                ids[kind] = ci.docker('run','--detach','--name',spec['container'],*label_args,'--network',plan['network'],
+                    '--publish','127.0.0.1:'+str(spec['port'])+':5432','--mount','type=volume,src='+spec['volume']+',dst=/var/lib/postgresql',
+                    '--tmpfs','/run/evote-secrets:rw,noexec,nosuid,nodev,mode=0755',
+                    '--env','POSTGRES_PASSWORD_FILE=/run/evote-secrets/bootstrap-password',
+                    '--env','POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=peer',
+                    '--entrypoint','/bin/sh',plan['postgres_image'],*PG_COMMAND)
+            checkpoint('container_'+kind+'_created')
+            state[0] = 'container_'+kind+'_secret'
+            with container_check('secret_injection'):
+                ci.docker('exec','--interactive',ids[kind],'/bin/sh','-ec',
+                    'umask 077; cat > /run/evote-secrets/bootstrap-password.tmp; chown postgres:postgres /run/evote-secrets/bootstrap-password.tmp; mv /run/evote-secrets/bootstrap-password.tmp /run/evote-secrets/bootstrap-password',
+                    input_text=boot[kind].get_secret_value())
+            checkpoint('container_'+kind+'_secret')
+        state[0] = 'container_ra_inspect'
+        with container_check('container_inspect'):
+            owned = OwnedContainers(plan,approval,ids)
+        for kind in ('ra','voting'):
+            state[0] = 'container_'+kind+'_inspect'
+            owned.verify_container(kind)
+            checkpoint('container_'+kind+'_inspect')
         checkpoint('containers')
         state[0] = 'bootstrap'
         for kind in ('ra','voting'):
@@ -281,11 +312,7 @@ def main():
         args = parser.parse_args(); logging.disable(logging.CRITICAL)
         run(args.node,args.signer,state); return 0
     except BaseException as error:
-        state_label = state[0] if state[0] in STAGES else 'preflight'
-        category = 'database_error' if isinstance(error,psycopg.Error) else 'assertion_error'
-        sqlstate = getattr(error,'sqlstate',None)
-        sqlstate = sqlstate if sqlstate in {'42501','28P01','3D000','23505','P4101','P4103'} else 'unavailable'
-        print(f'FAIL guarded_local_runtime stage={state_label} category={category} sqlstate={sqlstate}',flush=True)
+        print(failure(state,error),flush=True)
         return 1
 
 

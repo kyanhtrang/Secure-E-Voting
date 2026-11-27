@@ -5,6 +5,7 @@ hypervisor/Windows share and forwarding configuration still requires independent
 host inspection. Guest checks do not pretend to prove an uncompromised host.
 """
 from dataclasses import dataclass
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -23,6 +24,24 @@ PG_COMMAND = ['-ec',WAIT,'guarded-local','postgres','-c','password_encryption=sc
     '-c','log_statement=none','-c','log_min_error_statement=panic','-c','log_parameter_max_length=0',
     '-c','log_parameter_max_length_on_error=0','-c','max_connections=80']
 DOCKER_PREFIX = ['/usr/bin/docker','--config','/run/evote-no-docker-credentials','--host','unix:///var/run/docker.sock']
+CONTAINER_PREDICATES = frozenset({
+    'image_pull','network_create','volume_create','container_start','secret_injection',
+    'container_inspect','running_state','entrypoint','image_identity','ownership_labels',
+    'environment_overrides','persistent_mount','secret_tmpfs','secret_filesystem',
+    'secret_file_ready','container_policy','volume_identity','network_identity',
+})
+
+
+@contextmanager
+def container_check(identifier):
+    """Annotate only with fixed identifiers; preserve the original failure."""
+    require(identifier in CONTAINER_PREDICATES, 'CONFIG')
+    try: yield
+    except Exception as error:
+        existing = getattr(error,'container_predicate',None)
+        if not isinstance(existing,str) or existing not in CONTAINER_PREDICATES:
+            error.container_predicate = identifier
+        raise
 
 
 @dataclass(frozen=True)
@@ -95,48 +114,83 @@ class OwnedContainers:
         require(type(value) is list and len(value) == 1 and type(value[0]) is dict, 'OWNERSHIP')
         return value[0]
 
+    def verify_secret_storage(self, identifier):
+        """Read only mount/permission metadata, NEVER the secret file contents.
+
+        --tmpfs is HostConfig.Tmpfs, separate from --mount's MountPoints/Mounts
+        in Moby. Check the effective mount in the container's own namespace too.
+        """
+        with container_check('secret_filesystem'):
+            raw = command(DOCKER_PREFIX+['exec',identifier,'/bin/cat','/proc/self/mountinfo'])
+            entries = []
+            for line in raw.decode('ascii').splitlines():
+                before,after = line.split(' - ',1)
+                fields,filesystem = before.split(),after.split()
+                if fields[4] == '/run/evote-secrets': entries.append((fields,filesystem))
+            require(len(entries) == 1 and entries[0][1][0] == 'tmpfs'
+                and {'rw','noexec','nosuid','nodev'} <= set(entries[0][0][5].split(',')), 'OWNERSHIP')
+        with container_check('secret_file_ready'):
+            directory = command(DOCKER_PREFIX+['exec',identifier,'/usr/bin/stat','-c','%F|%a','--','/run/evote-secrets'])
+            require(directory.strip() == b'directory|755', 'OWNERSHIP')
+            metadata = command(DOCKER_PREFIX+['exec',identifier,'/usr/bin/stat','-c','%F|%a|%U|%G|%h|%s',
+                '--','/run/evote-secrets/bootstrap-password']).decode('ascii').strip().split('|')
+            require(len(metadata) == 6 and metadata[:5] == ['regular file','600','postgres','postgres','1']
+                and metadata[5].isdigit() and 48 <= int(metadata[5]) <= 131072, 'OWNERSHIP')
+
     def verify_container(self, kind, *, running=True):
         """Also used explicitly by hosted tests; does NOT assert VM validation."""
         spec = database_spec(self.plan,kind)
-        actual = self.inspect(self.ids[kind])
-        require(actual['State']['Running'] is running and not actual['HostConfig'].get('Binds')
-            and not actual['HostConfig'].get('CapAdd') and not actual['HostConfig'].get('Devices'), 'OWNERSHIP')
-        require(actual['Config']['Entrypoint'] == ['/bin/sh'] and actual['Config']['Cmd'] == PG_COMMAND, 'OWNERSHIP')
-        image = self.inspect('--type=image',self.plan['postgres_image'])
-        require(actual['Image'] == image['Id'], 'OWNERSHIP')
-        expected_labels = dict(image['Config'].get('Labels') or {})
-        expected_labels.update(labels(self.plan,kind))
-        require(actual['Config']['Labels'] == expected_labels, 'OWNERSHIP')
-        defaults = dict(item.split('=',1) for item in image['Config']['Env'])
-        env = actual['Config']['Env']
-        require(len(env) == len({item.split('=',1)[0] for item in env}), 'OWNERSHIP')
-        overrides = [item for item in env if defaults.get(item.split('=',1)[0]) != item.split('=',1)[1]]
-        require(all(any(item == key+'='+value for item in env) or any(item.startswith(key+'=') for item in overrides)
-            for key,value in defaults.items()), 'OWNERSHIP')
-        expected_env = ['POSTGRES_PASSWORD_FILE=/run/evote-secrets/bootstrap-password',
-            'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=peer']
-        require(len(overrides) == len(expected_env) and set(overrides) == set(expected_env), 'OWNERSHIP')
-        # Do not drop unknown mounts. Only tmpfs secret staging is additional to
-        # the Phase11A persistent-volume projection; it cannot contain host data.
-        mounts = actual['Mounts']
-        require(len(mounts) == 2 and len(actual['HostConfig'].get('Tmpfs',{})) == 1
-            and set(actual['HostConfig']['Tmpfs']) == {'/run/evote-secrets'}, 'OWNERSHIP')
-        require(set(actual['HostConfig']['Tmpfs']['/run/evote-secrets'].split(',')) ==
-            {'rw','noexec','nosuid','nodev','mode=0755'}, 'OWNERSHIP')
-        secret = [m for m in mounts if m['Destination'] == '/run/evote-secrets']
-        require(len(secret) == 1 and secret[0]['Type'] == 'tmpfs' and secret[0]['RW'] is True, 'OWNERSHIP')
-        data = [{k:m[k] for k in ('Type','Name','Destination','RW')} for m in mounts if m['Destination'] != '/run/evote-secrets']
+        with container_check('container_inspect'):
+            actual = self.inspect(self.ids[kind])
+        with container_check('running_state'):
+            require(actual['State']['Running'] is running and not actual['HostConfig'].get('Binds')
+                and not actual['HostConfig'].get('CapAdd') and not actual['HostConfig'].get('Devices'), 'OWNERSHIP')
+        with container_check('entrypoint'):
+            require(actual['Config']['Entrypoint'] == ['/bin/sh'] and actual['Config']['Cmd'] == PG_COMMAND, 'OWNERSHIP')
+        with container_check('image_identity'):
+            image = self.inspect('--type=image',self.plan['postgres_image'])
+            require(actual['Image'] == image['Id'], 'OWNERSHIP')
+        with container_check('ownership_labels'):
+            expected_labels = dict(image['Config'].get('Labels') or {})
+            expected_labels.update(labels(self.plan,kind))
+            require(actual['Config']['Labels'] == expected_labels, 'OWNERSHIP')
+        with container_check('environment_overrides'):
+            defaults = dict(item.split('=',1) for item in image['Config']['Env'])
+            env = actual['Config']['Env']
+            require(len(env) == len({item.split('=',1)[0] for item in env}), 'OWNERSHIP')
+            overrides = [item for item in env if defaults.get(item.split('=',1)[0]) != item.split('=',1)[1]]
+            require(all(any(item == key+'='+value for item in env) or any(item.startswith(key+'=') for item in overrides)
+                for key,value in defaults.items()), 'OWNERSHIP')
+            expected_env = ['POSTGRES_PASSWORD_FILE=/run/evote-secrets/bootstrap-password',
+                'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=peer']
+            require(len(overrides) == len(expected_env) and set(overrides) == set(expected_env), 'OWNERSHIP')
+        with container_check('persistent_mount'):
+            # --mount volume is in Mounts; legacy --tmpfs is NOT a second entry.
+            # Retain every entry: no filtering that could hide extra/bind mounts.
+            mounts = actual['Mounts']
+            require(type(mounts) is list and len(mounts) == 1, 'OWNERSHIP')
+            data = [{k:m[k] for k in ('Type','Name','Destination','RW')} for m in mounts]
+            require(data == [dict(Type='volume',Name=spec['volume'],Destination='/var/lib/postgresql',RW=True)], 'OWNERSHIP')
+        with container_check('secret_tmpfs'):
+            require(len(actual['HostConfig'].get('Tmpfs',{})) == 1
+                and set(actual['HostConfig']['Tmpfs']) == {'/run/evote-secrets'}, 'OWNERSHIP')
+            require(set(actual['HostConfig']['Tmpfs']['/run/evote-secrets'].split(',')) ==
+                {'rw','noexec','nosuid','nodev','mode=0755'}, 'OWNERSHIP')
         observed = dict(actual,Config=dict(actual['Config'],Env=expected_env,Labels=labels(self.plan,kind)),Mounts=data)
-        if not running:
-            # A stopped container has no live port mapping. Check that fact,
-            # then validate its *configured* mapping with the same base policy.
-            require(actual['NetworkSettings']['Ports'] in ({},{'5432/tcp':None}), 'OWNERSHIP')
-            observed['NetworkSettings'] = dict(actual['NetworkSettings'],Ports=actual['HostConfig']['PortBindings'])
-        validate_container(self.plan,kind,self.ids[kind],observed)
-        validate_volume(self.plan,kind,self.inspect('--type=volume',spec['volume']))
-        network = self.inspect('--type=network',self.plan['network'])
-        validate_network(self.plan,{k:network[k] for k in ('Name','Driver','Internal','Labels')})
-        require(set(actual['NetworkSettings']['Networks']) == {self.plan['network']}, 'OWNERSHIP')
+        with container_check('container_policy'):
+            if not running:
+                # Stopped metadata is not live filesystem/port evidence.
+                require(actual['NetworkSettings']['Ports'] in ({},{'5432/tcp':None}), 'OWNERSHIP')
+                observed['NetworkSettings'] = dict(actual['NetworkSettings'],Ports=actual['HostConfig']['PortBindings'])
+            validate_container(self.plan,kind,self.ids[kind],observed)
+        with container_check('volume_identity'):
+            validate_volume(self.plan,kind,self.inspect('--type=volume',spec['volume']))
+        with container_check('network_identity'):
+            network = self.inspect('--type=network',self.plan['network'])
+            validate_network(self.plan,{k:network[k] for k in ('Name','Driver','Internal','Labels')})
+            require(set(actual['NetworkSettings']['Networks']) == {self.plan['network']}, 'OWNERSHIP')
+        # Only exec metadata probes after ALL identity/isolation guards pass.
+        if running: self.verify_secret_storage(self.ids[kind])
         return hashlib.sha256((self.ids[kind]+spec['marker']).encode()).hexdigest()
 
     def verify(self, kind):
