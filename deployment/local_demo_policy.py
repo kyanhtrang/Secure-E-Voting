@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from uuid import UUID, uuid4
 
-BASE = '9ce5571393801297f9ced8a113c341a4404d250d'
+BASE = 'bd15d7dd659208bb9a8df18806d32b2322da1666'
 ROOT = Path(__file__).resolve().parents[1]
 CODES = {'CONFIG','ENVIRONMENT','SOURCE','IDENTITY','OWNERSHIP','ROLE','ASSET_BOUNDARY','LIFECYCLE','APPROVAL_REQUIRED'}
 
@@ -54,7 +54,12 @@ SOURCE_FILES = (
     'crypto_interop/signer/go.sum','crypto_interop/signer/cmd/ra-credential-signer/main.go',
     'backend/voting/requirements.lock.txt','scripts/voting_postgres_ci.py','scripts/voting_tally_auth.py',
     'scripts/full_election_e2e.py','scripts/admin_publication_ui_ci.py','deployment/local_demo_policy.py',
-    'deployment/local_demo_lifecycle.py','scripts/local_demo_preflight.py')
+    'deployment/local_demo_lifecycle.py','scripts/local_demo_preflight.py',
+    'deployment/local_runtime_database.py','deployment/local_runtime_boundary.py','deployment/local_runtime_voters.py',
+    'deployment/local_runtime_custody.py','deployment/local_runtime_processes.py','deployment/local_runtime_apps.py',
+    'deployment/local_runtime_worker.py','deployment/local_runtime_migrations.py','deployment/local_migrations/env.py',
+    'deployment/local_runtime_setup.py','deployment/local_runtime_containers.py','scripts/local_demo_runtime.py','scripts/guarded_local_runtime_ci.py',
+    '.github/workflows/guarded-local-runtime.yml')
 MIGRATION_FOLDERS = ('ra','admin_ra','voting','admin_voting','tally','board')
 
 

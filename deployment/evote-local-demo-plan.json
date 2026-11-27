@@ -40,7 +40,7 @@
   "platform": "windows11-dedicated-ubuntu24.04-vm",
   "postgres_image": "postgres:18-bookworm@sha256:ece55f7868da684e400f82f1030a050718adbdd65c23aa500c486f6e2950dc0f",
   "purpose": "synthetic-only",
-  "reviewed_base": "9ce5571393801297f9ced8a113c341a4404d250d",
+  "reviewed_base": "bd15d7dd659208bb9a8df18806d32b2322da1666",
   "services": {
     "admin": {
       "evidence": "none",
@@ -151,7 +151,7 @@
       "verifiers": []
     }
   },
-  "source_digest": "9a7598a92f67029fbf728712d612fec2fccb302cf3c43ff4e7a890caa8774773",
+  "source_digest": "8ff4ddc76a2e65e481caca6795ac14f93b37d12c400b9f73dc9c83c460ae93d6",
   "version": 1,
   "vm_requirements": {
     "docker_socket_to_apps": false,

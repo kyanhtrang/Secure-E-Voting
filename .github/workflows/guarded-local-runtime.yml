@@ -1,0 +1,63 @@
+name: Guarded local runtime contracts and disposable PostgreSQL
+"on":
+  push:
+    branches: [feat/guarded-local-runtime]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  guarded-local-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      GOWORK: "off"
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.11.9"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.25.14"
+          cache: false
+      - name: Locked dependencies and complete database-free regression
+        run: |
+          umask 077
+          python -m venv "$RUNNER_TEMP/guarded-runtime-python"
+          gate_python="$RUNNER_TEMP/guarded-runtime-python/bin/python"
+          printf 'EVOTE_TEST_PYTHON=%s\n' "$gate_python" >> "$GITHUB_ENV"
+          "$gate_python" -m pip install --no-deps -r backend/voting/requirements.lock.txt
+          "$gate_python" -m pip check
+          "$gate_python" scripts/voting_postgres_ci.py --verify-dependencies
+          npm --prefix crypto_interop ci --ignore-scripts
+          npm --prefix crypto_interop run build
+          export EVOTE_TEST_NODE="$(command -v node)"
+          "$gate_python" -m pytest tests/ crypto_interop/ -q
+          node --test crypto_interop/dist/pending_state.test.js
+          python -I -S scripts/local_demo_preflight.py check --public-plan deployment/evote-local-demo-plan.json
+      - name: Native reviewed CIRCL signer
+        working-directory: crypto_interop/signer
+        run: |
+          go mod download
+          go mod verify
+          go test -count=1 ./...
+          go build -o "$RUNNER_TEMP/guarded-runtime-signer" ./cmd/ra-credential-signer
+      - name: Real isolated PostgreSQL local-adapter contracts (not VM deployment)
+        run: |
+          "$EVOTE_TEST_PYTHON" scripts/guarded_local_runtime_ci.py \
+            --node "$(command -v node)" --signer "$RUNNER_TEMP/guarded-runtime-signer"
+          git diff --exit-code
+          git diff --check
