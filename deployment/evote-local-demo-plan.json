@@ -151,7 +151,7 @@
       "verifiers": []
     }
   },
-  "source_digest": "c16675cd6559a6a02b656bc0fd6aebfe2dc251cb03295a10444db8a3fd042947",
+  "source_digest": "4812e38f0975769f42a901e93e46d6a208a7be152f7f38fe1eefcd2f50fbb5b6",
   "version": 1,
   "vm_requirements": {
     "docker_socket_to_apps": false,

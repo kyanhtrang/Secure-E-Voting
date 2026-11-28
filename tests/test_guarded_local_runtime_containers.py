@@ -59,11 +59,11 @@ def test_legacy_tmpfs_and_single_named_volume_pass_with_effective_filesystem_evi
     ('missing_tmpfs','secret_tmpfs'),('extra_tmpfs','secret_tmpfs'),('unsafe_tmpfs_options','secret_tmpfs'),
     ('extra_volume','persistent_mount'),('bind','persistent_mount'),('docker_socket','persistent_mount'),
     ('wrong_volume','persistent_mount'),('legacy_wrong_mock','persistent_mount'),
-    ('wrong_image','image_identity'),('wrong_image_reference','container_policy'),
-    ('wrong_network','network_identity'),('wrong_network_mode','container_policy'),
+    ('wrong_image','image_identity'),('wrong_image_reference','policy_image_reference'),
+    ('wrong_network','network_identity'),('wrong_network_mode','policy_network_mode'),
     ('environment','environment_overrides'),('wrong_ownership','ownership_labels'),
-    ('wrong_id','container_policy'),('wrong_name','container_policy'),
-    ('privileged','container_policy'),('lan','container_policy'),('extra_port','container_policy'),
+    ('wrong_id','policy_container_id'),('wrong_name','policy_container_name'),
+    ('privileged','policy_privileged'),('lan','policy_configured_ports'),('extra_port','policy_configured_ports'),
     ('not_running','running_state'),('host_bind','running_state'),
 ])
 def test_mount_and_existing_isolation_guards_remain_strict(plan,monkeypatch,mutation,predicate):
@@ -142,7 +142,8 @@ def test_nested_check_preserves_exact_failure_and_only_allowlisted_predicate():
     ('container_image','image_pull'),('container_network','network_create'),
     ('container_ra_created','container_start'),('container_ra_secret','secret_injection'),
     ('container_voting_created','container_start'),('container_voting_secret','secret_injection'),
-    ('container_ra_inspect','persistent_mount'),('container_voting_inspect','persistent_mount')])
+    ('container_ra_inspect','persistent_mount'),('container_voting_inspect','persistent_mount'),
+    ('container_ra_inspect','policy_effective_ports'),('container_voting_inspect','policy_effective_ports')])
 def test_coordinator_pinpoints_failures_and_cleanup_preserves_original_stage(plan,monkeypatch,tmp_path,capsys,fail_at,predicate):
     monkeypatch.setattr(gate.ci,'require_ci',Mock()); monkeypatch.setattr(gate.ci,'verify_dependencies',Mock())
     monkeypatch.setattr(gate,'new_plan',lambda:plan)
@@ -152,7 +153,8 @@ def test_coordinator_pinpoints_failures_and_cleanup_preserves_original_stage(pla
     fixtures = {kind:raw_container_fixture(plan,kind) for kind in ('ra','voting')}
     for kind in ('ra','voting'):
         if fail_at == 'container_'+kind+'_inspect':
-            fixtures[kind][0]['Mounts'].append(dict(Type='tmpfs',Destination='/run/evote-secrets',RW=True))
+            if predicate == 'policy_effective_ports': fixtures[kind][0]['NetworkSettings']['Ports'] = {'5432/tcp':None}
+            else: fixtures[kind][0]['Mounts'].append(dict(Type='tmpfs',Destination='/run/evote-secrets',RW=True))
     stage = ['preflight']; operations = []
     def docker(*args,**kwargs):
         operations.append(args[:2])
@@ -196,3 +198,72 @@ def test_coordinator_pinpoints_failures_and_cleanup_preserves_original_stage(pla
 
 def test_offline_source_policy_remains_review_only(plan):
     assert policy.validate_plan(plan) == plan and plan['execution_ready'] is False
+
+
+def test_policy_diagnostics_pass_positive_contract_without_claiming_engine_compatibility(plan):
+    # This is a policy-contract observation, not evidence that --internal creates
+    # published host ports. The separate negative tests retain that distinction.
+    from tests.test_local_demo_policy import observation
+    policy.validate_container(plan,'ra','a'*64,observation(plan))
+    assert policy.CONTAINER_POLICY_PREDICATES <= boundary.CONTAINER_PREDICATES
+
+
+@pytest.mark.parametrize('predicate',sorted(policy.CONTAINER_POLICY_PREDICATES))
+def test_each_pure_policy_guard_has_its_own_fixed_failure_id(plan,predicate):
+    from tests.test_local_demo_policy import observation
+    observed = observation(plan); kind,identifier = 'ra','a'*64
+    if predicate == 'policy_kind': kind = 'other'
+    elif predicate == 'policy_created_id': identifier = 'malformed'
+    elif predicate == 'policy_database_spec': plan['databases']['ra']['name'] = 'ra_db'
+    elif predicate == 'policy_observation': observed = None
+    elif predicate == 'policy_network_name': plan['network'] = 'unowned-network'
+    elif predicate == 'policy_container_id': observed['Id'] = 'b'*64
+    elif predicate == 'policy_container_name': observed['Name'] = '/unowned'
+    elif predicate == 'policy_image_reference': observed['Config']['Image'] = 'postgres:latest'
+    elif predicate == 'policy_labels': observed['Config']['Labels'] = {}
+    elif predicate == 'policy_privileged': observed['HostConfig']['Privileged'] = True
+    elif predicate == 'policy_network_mode': observed['HostConfig']['NetworkMode'] = 'host'
+    elif predicate == 'policy_pid_namespace': observed['HostConfig']['PidMode'] = 'host'
+    elif predicate == 'policy_ipc_namespace': observed['HostConfig']['IpcMode'] = 'host'
+    elif predicate == 'policy_autoremove': observed['HostConfig']['AutoRemove'] = True
+    elif predicate == 'policy_configured_ports': observed['HostConfig']['PortBindings'] = {}
+    elif predicate == 'policy_effective_ports': observed['NetworkSettings']['Ports'] = {'5432/tcp':None}
+    elif predicate == 'policy_persistent_mount': observed['Mounts'] = []
+    elif predicate == 'policy_environment': observed['Config']['Env'].append('POSTGRES_PASSWORD=SECRET_CANARY')
+    else: raise AssertionError('Uncovered policy diagnostic')
+    with pytest.raises(policy.ReviewRefused) as caught: policy.validate_container(plan,kind,identifier,observed)
+    assert caught.value.container_predicate == predicate
+    # The boundary's outer generic context must retain the more precise label.
+    with pytest.raises(policy.ReviewRefused) as annotated:
+        with boundary.container_check('container_policy'): raise caught.value
+    assert annotated.value is caught.value and annotated.value.container_predicate == predicate
+    assert gate.failure(['container_ra_inspect'],caught.value) == f'FAIL guarded_local_runtime stage=container_ra_inspect predicate={predicate} category=assertion_error'
+
+
+@pytest.mark.parametrize('ports',[{},None,{'5432/tcp':None},{'5432/tcp':[]},
+    {'5432/tcp':[{'HostIp':'0.0.0.0','HostPort':'55432'}]},
+    {'5432/tcp':[{'HostIp':'127.0.0.1','HostPort':'55433'}]}])
+def test_configured_bindings_do_not_prove_effective_published_ports(plan,monkeypatch,ports):
+    actual,*_ = raw_container_fixture(plan)
+    actual['NetworkSettings']['Ports'] = ports
+    owned,commands = evidence(plan,monkeypatch,actual)
+    with pytest.raises(policy.ReviewRefused) as caught: owned.verify_container('ra')
+    assert caught.value.container_predicate == 'policy_effective_ports' and commands == []
+
+
+@pytest.mark.parametrize('field,predicate',[
+    ('Privileged','policy_privileged'),('NetworkMode','policy_network_mode'),('PidMode','policy_pid_namespace'),
+    ('IpcMode','policy_ipc_namespace'),('AutoRemove','policy_autoremove'),('PortBindings','policy_configured_ports')])
+def test_missing_inspect_fields_fail_with_precise_sanitized_identifiers(plan,field,predicate):
+    from tests.test_local_demo_policy import observation
+    observed = observation(plan); del observed['HostConfig'][field]
+    with pytest.raises(policy.ReviewRefused) as caught: policy.validate_container(plan,'ra','a'*64,observed)
+    assert caught.value.container_predicate == predicate and str(caught.value) == 'Local demo review refused'
+
+
+def test_invalid_stopped_port_metadata_has_a_separate_predicate(plan,monkeypatch):
+    actual,*_ = raw_container_fixture(plan)
+    actual['State']['Running'] = False
+    owned,commands = evidence(plan,monkeypatch,actual)
+    with pytest.raises(policy.ReviewRefused) as caught: owned.verify_container('ra',running=False)
+    assert caught.value.container_predicate == 'container_stopped_ports' and commands == []

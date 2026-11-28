@@ -4,6 +4,7 @@ Observation validators are predicates for a future approved collector. Supplied
 JSON is never evidence of a live deployment, nor authorization to execute one.
 """
 import ast
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -13,6 +14,12 @@ from uuid import UUID, uuid4
 BASE = 'bd15d7dd659208bb9a8df18806d32b2322da1666'
 ROOT = Path(__file__).resolve().parents[1]
 CODES = {'CONFIG','ENVIRONMENT','SOURCE','IDENTITY','OWNERSHIP','ROLE','ASSET_BOUNDARY','LIFECYCLE','APPROVAL_REQUIRED'}
+CONTAINER_POLICY_PREDICATES = frozenset({
+    'policy_kind','policy_created_id','policy_database_spec','policy_observation','policy_network_name',
+    'policy_container_id','policy_container_name','policy_image_reference','policy_labels',
+    'policy_privileged','policy_network_mode','policy_pid_namespace','policy_ipc_namespace','policy_autoremove',
+    'policy_configured_ports','policy_effective_ports','policy_persistent_mount','policy_environment',
+})
 
 
 class ReviewRefused(Exception):
@@ -23,6 +30,20 @@ class ReviewRefused(Exception):
 
 def require(condition, code='CONFIG'):
     if not condition: raise ReviewRefused(code)
+
+
+@contextmanager
+def container_policy_check(identifier):
+    """Fixed diagnostics only; this stdlib-only module performs no observation IO."""
+    require(identifier in CONTAINER_POLICY_PREDICATES)
+    try: yield
+    except (KeyError,TypeError):
+        error = ReviewRefused('OWNERSHIP')
+        error.container_predicate = identifier
+        raise error from None
+    except ReviewRefused as error:
+        error.container_predicate = identifier
+        raise
 
 
 def canonical(value):
@@ -178,22 +199,45 @@ def validate_container(plan, kind, created_id, observed):
     collector must be reviewed/tested; these predicates cannot authenticate it.
     """
     import re
-    require(kind in ('ra','voting') and type(created_id) is str and re.fullmatch('[0-9a-f]{64}',created_id) is not None,'OWNERSHIP')
-    spec = database_spec(plan,kind)
-    try:
+    with container_policy_check('policy_kind'):
+        require(kind in ('ra','voting'),'OWNERSHIP')
+    with container_policy_check('policy_created_id'):
+        require(type(created_id) is str and re.fullmatch('[0-9a-f]{64}',created_id) is not None,'OWNERSHIP')
+    with container_policy_check('policy_database_spec'):
+        spec = database_spec(plan,kind)
+    with container_policy_check('policy_observation'):
         config,host = observed['Config'],observed['HostConfig']
+    with container_policy_check('policy_network_name'):
         require(plan['network'] == 'evote-local-'+UUID(plan['identifiers']['profile']).hex,'OWNERSHIP')
-        require(observed['Id'] == created_id and observed['Name'] == '/'+spec['container']
-            and config['Image'] == plan['postgres_image'] and config['Labels'] == labels(plan,kind),'OWNERSHIP')
-        require(host['Privileged'] is False and host['NetworkMode'] == plan['network'] and host['PidMode'] != 'host'
-            and host['IpcMode'] != 'host' and host['AutoRemove'] is False,'OWNERSHIP')
+    with container_policy_check('policy_container_id'):
+        require(observed['Id'] == created_id,'OWNERSHIP')
+    with container_policy_check('policy_container_name'):
+        require(observed['Name'] == '/'+spec['container'],'OWNERSHIP')
+    with container_policy_check('policy_image_reference'):
+        require(config['Image'] == plan['postgres_image'],'OWNERSHIP')
+    with container_policy_check('policy_labels'):
+        require(config['Labels'] == labels(plan,kind),'OWNERSHIP')
+    with container_policy_check('policy_privileged'):
+        require(host['Privileged'] is False,'OWNERSHIP')
+    with container_policy_check('policy_network_mode'):
+        require(host['NetworkMode'] == plan['network'],'OWNERSHIP')
+    with container_policy_check('policy_pid_namespace'):
+        require(host['PidMode'] != 'host','OWNERSHIP')
+    with container_policy_check('policy_ipc_namespace'):
+        require(host['IpcMode'] != 'host','OWNERSHIP')
+    with container_policy_check('policy_autoremove'):
+        require(host['AutoRemove'] is False,'OWNERSHIP')
+    with container_policy_check('policy_configured_ports'):
         expected = {'5432/tcp':[{'HostIp':'127.0.0.1','HostPort':str(spec['port'])}]}
-        require(host['PortBindings'] == expected and observed['NetworkSettings']['Ports'] == expected,'OWNERSHIP')
+        require(host['PortBindings'] == expected,'OWNERSHIP')
+    with container_policy_check('policy_effective_ports'):
+        require(observed['NetworkSettings']['Ports'] == expected,'OWNERSHIP')
+    with container_policy_check('policy_persistent_mount'):
         # DB storage survives stop. No bind mounts/Windows paths/Docker socket.
         require(observed['Mounts'] == [dict(Type='volume',Name=spec['volume'],Destination='/var/lib/postgresql',RW=True)],'OWNERSHIP')
+    with container_policy_check('policy_environment'):
         require(config['Env'] == ['POSTGRES_PASSWORD_FILE=/run/evote-secrets/bootstrap-password',
             'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=peer'],'OWNERSHIP')
-    except (KeyError,TypeError): raise ReviewRefused('OWNERSHIP') from None
 
 
 def validate_volume(plan, kind, observed):

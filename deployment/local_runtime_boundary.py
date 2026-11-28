@@ -16,7 +16,7 @@ import sys
 
 from deployment.local_demo_policy import (
     ReviewRefused, database_spec, fingerprint, labels, require, safe_environment,
-    validate_container, validate_network, validate_plan, validate_volume,
+    validate_container, validate_network, validate_plan, validate_volume, CONTAINER_POLICY_PREDICATES,
 )
 
 WAIT = 'while [ ! -s /run/evote-secrets/bootstrap-password ]; do sleep 0.05; done; exec /usr/local/bin/docker-entrypoint.sh "$@"'
@@ -28,8 +28,8 @@ CONTAINER_PREDICATES = frozenset({
     'image_pull','network_create','volume_create','container_start','secret_injection',
     'container_inspect','running_state','entrypoint','image_identity','ownership_labels',
     'environment_overrides','persistent_mount','secret_tmpfs','secret_filesystem',
-    'secret_file_ready','container_policy','volume_identity','network_identity',
-})
+    'secret_file_ready','container_policy','container_stopped_ports','volume_identity','network_identity',
+}) | CONTAINER_POLICY_PREDICATES
 
 
 @contextmanager
@@ -180,8 +180,9 @@ class OwnedContainers:
         with container_check('container_policy'):
             if not running:
                 # Stopped metadata is not live filesystem/port evidence.
-                require(actual['NetworkSettings']['Ports'] in ({},{'5432/tcp':None}), 'OWNERSHIP')
-                observed['NetworkSettings'] = dict(actual['NetworkSettings'],Ports=actual['HostConfig']['PortBindings'])
+                with container_check('container_stopped_ports'):
+                    require(actual['NetworkSettings']['Ports'] in ({},{'5432/tcp':None}), 'OWNERSHIP')
+                    observed['NetworkSettings'] = dict(actual['NetworkSettings'],Ports=actual['HostConfig']['PortBindings'])
             validate_container(self.plan,kind,self.ids[kind],observed)
         with container_check('volume_identity'):
             validate_volume(self.plan,kind,self.inspect('--type=volume',spec['volume']))
